@@ -1,3 +1,22 @@
+/* fxp_progressive_harness — quantization-impact harness driven by evaluate.py.
+ *
+ * Runs the full Cough-E detection loop in float, but selectively replaces one
+ * pipeline block at a time with its FxP implementation. The block to swap in
+ * is chosen by argv[1] (audio_fft, audio_psd, audio_mel, audio_scalar,
+ * audio_all, imu_raw, imu_l2, imu_all). Everything downstream of the swapped
+ * block stays float, so any drift in the COUGH_SEG / N_PEAKS FINAL output is
+ * attributable to that single block's quantization.
+ *
+ * Inputs are injected at compile time via gcc -include of per-recording
+ * audio/imu/bio headers (the evaluate.py builder sets PROGRESSIVE_INPUTS_INJECTED
+ * and -include flags). The defaults guarded below are only there to keep the
+ * file standalone-buildable for development.
+ *
+ * Output (stdout) matches the format the rest of the evaluation pipeline
+ * expects, so downstream scoring code reads it the same way it reads the float
+ * reference and the full-FxP main.c.
+ */
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +74,9 @@ typedef struct {
 
 static local_fsm_t fsm_state;
 
+/* The "block" the harness replaces with its FxP variant on this run. *_ALL
+ * variants swap every block in the corresponding pipeline, the others isolate
+ * a single kernel family. */
 typedef enum {
     BLOCK_AUDIO_FFT,
     BLOCK_AUDIO_PSD,
@@ -153,6 +175,11 @@ static void copy_audio_feature_range(float *dst, const fxp_feat_t *src, uint16_t
     }
 }
 
+/* Run the FxP version of one audio block on the float window and write its
+ * outputs back into the float feature array, overwriting whatever the float
+ * pipeline produced for those features earlier in the loop. The float window
+ * is converted to Q14 once up front; everything else stays float so any error
+ * propagating from this point on comes from this block's quantization only. */
 static void apply_audio_block(progressive_block_t block,
                               const float *sig,
                               int16_t len,
@@ -208,6 +235,10 @@ static void copy_imu_local(float *dst, const fxp_feat_t *src, int base)
     }
 }
 
+/* Same idea as apply_audio_block, for IMU. The raw axes are converted to Q11.5
+ * once and the L2 norms are precomputed in their UQ10.6 / UQ5.11 carriers so
+ * that whichever sub-block the caller asked for can be kicked off without
+ * redoing the front-end work. */
 static void apply_imu_block(progressive_block_t block,
                             const float sig[][Num_IMU_signals],
                             int16_t len,
@@ -277,6 +308,10 @@ static uint8_t is_cough(float score, float threshold)
     return (score >= threshold) ? 1U : 0U;
 }
 
+/* The harness owns its own copy of the IMU-first / audio-on-cough FSM that
+ * main.c uses, kept local so this binary doesn't link in fsm_control.c (whose
+ * symbols would conflict with the float-side build). The state machine, tick
+ * accounting, and postprocessing trigger mirror main.c one-to-one. */
 static void init_state_local(void)
 {
     fsm_state.model = IMU_MODEL_LOCAL;
@@ -381,6 +416,10 @@ int main(int argc, char **argv)
 
     init_state_local();
 
+    /* Per-window detection loop. For each window the float pipeline runs in
+     * full, then apply_*_block overwrites only the features that belong to
+     * the chosen FxP block, then the float classifier and postprocessing
+     * consume the (mixed) feature vector. */
     while (1) {
         idx_start_window = get_idx_window_local();
 

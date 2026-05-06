@@ -1,12 +1,29 @@
+/* fxp_stage_harness — per-kernel error harness driven by evaluate.py.
+ *
+ * Sweeps every analysis window of one recording and, for each window, runs
+ * the float reference and the fixed-point pipeline side by side. The two
+ * outputs are diffed at every kernel boundary (FFT magnitudes, mel power,
+ * dB conversion, RMS, line length, AZC, etc.) and the per-kernel error
+ * statistics are accumulated into the named_metric_t tables, then printed
+ * at the end as the single source of truth for "how lossy is each FxP
+ * kernel relative to its float reference."
+ *
+ * Unlike fxp_progressive_harness, this binary does not run the detection
+ * loop or emit COUGH_SEG/N_PEAKS lines — its output is purely numerical
+ * error metrics consumed by evaluate.py for the FxP-vs-float report.
+ *
+ * Audio + IMU input headers are injected via gcc -include so callers can
+ * swap them per recording without quoting headaches in Make/shell. The
+ * defaults below are used only when neither -include is provided.
+ */
+
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Audio + IMU input headers are injected via gcc -include so callers can
- * swap them per recording without quoting headaches in Make/shell. The
- * defaults below are used only when neither -include is provided. */
+
 #if !defined(AUDIO_LEN)
 #include <input_data/audio_input_55502_w0_9wnds.h>
 #endif
@@ -42,6 +59,9 @@ int main(void)
 }
 #else
 
+/* Pretty-printers used only for the final per-kernel report header. They map
+ * the audio/IMU feature enum back to the human-readable kernel grouping that
+ * evaluate.py expects to see in the output. */
 static const char *audio_feature_name(int idx)
 {
     switch (idx) {
@@ -127,6 +147,11 @@ static void imu_feature_name(int idx, char *buf, size_t n)
     snprintf(buf, n, "%s_%s", imu_signal_name(sig), imu_family_name(fam));
 }
 
+/* Float reference feature extractor. Mirrors the kernel call sequence that
+ * fxp_audio_features uses internally, but in float, so we can compare each
+ * kernel's output against its FxP counterpart at the same point in the chain
+ * (the kernel-error helpers below don't have access to the reference Python
+ * pipeline, so we recompute it here). */
 static void compute_audio_float_features(const int8_t *selector,
                                          const float *sig,
                                          int16_t len,
@@ -309,6 +334,10 @@ static void compute_imu_float_features(const int8_t *selector,
 
 #define MAX_KERNELS 64
 
+/* One slot per kernel name; fxp_metric_acc_t accumulates ref/fxp pairs and
+ * computes summary statistics (max abs error, RMSE, etc.) on demand. The
+ * harness adds samples to a slot keyed by kernel name during the window
+ * sweep, then prints all slots once at the end. */
 typedef struct {
     char name[48];
     fxp_metric_acc_t acc;
@@ -339,6 +368,14 @@ static void add_metric(named_metric_t *table,
 static float audio_feat_to_float(fxp_feat_t value, uint16_t feature_idx);
 static float imu_feat_to_float(fxp_feat_t value, uint16_t feature_idx);
 
+/* Audio FFT kernel diff. Uses audio_fft_stage_probe (a debug entry point in
+ * audio_pipeline_fxp.c, only compiled when FXP_STAGE_PROBES is set) to
+ * expose the FxP magnitudes and frequency bins in addition to the final
+ * features, so we can record errors at every internal stage of the FFT
+ * subpipeline rather than only on the final feature values. The mag_scale
+ * normalization is needed because the float and FxP RFFTs use different
+ * normalizations; we collapse that out so the reported error reflects bin
+ * shape only, not absolute amplitude. */
 static void add_audio_fft_kernel_metrics(named_metric_t *table,
                                          int *count,
                                          const int8_t *selector,
@@ -443,6 +480,11 @@ static int audio_mel_feature_selected(const int8_t *selector)
     return 0;
 }
 
+/* Audio mel kernel diff. The probe (audio_mel_stage_probe) hands back the
+ * intermediate STFT power, mel-weighted power, and pre-clip dB rows from the
+ * FxP path, which we compare against the float reference (stft,
+ * mel_spectrogram, power_to_dB, entropy, and the per-row mean/std/max/entropy
+ * aggregations). Each comparison goes into its own kernel slot. */
 static void add_audio_mel_kernel_metrics(named_metric_t *table,
                                          int *count,
                                          const int8_t *selector,
@@ -598,6 +640,11 @@ static void add_audio_scalar_kernel_metrics(named_metric_t *table,
     free(centered);
 }
 
+/* For features whose final value is what we want to attribute back to a
+ * named kernel, this function maps the audio feature enum to the kernel
+ * slot(s) that contributed to it. Spectral features handled by the FFT/mel
+ * probes return early because their per-stage errors were already recorded
+ * by add_audio_fft_kernel_metrics / add_audio_mel_kernel_metrics. */
 static void add_audio_kernel_errors(named_metric_t *table,
                                     int *count,
                                     int feature_idx,
@@ -642,6 +689,9 @@ static void add_audio_kernel_errors(named_metric_t *table,
     }
 }
 
+/* IMU equivalent of add_audio_kernel_errors. The L2-norm signals (ACCEL_COMBO,
+ * GYRO_COMBO) get an extra slot because their values are derived from a sqrt
+ * across three axes that's worth tracking on its own. */
 static void add_imu_kernel_errors(named_metric_t *table,
                                   int *count,
                                   int feature_idx,
@@ -694,6 +744,10 @@ static float imu_feat_to_float(fxp_feat_t value, uint16_t feature_idx)
     return FXP_TO_FLOAT(value, imu_feature_frac_bits(feature_idx));
 }
 
+/* Sweep every analysis window of this recording, run float + FxP side by
+ * side, and accumulate per-kernel error stats. The audio and IMU passes are
+ * independent — the harness does not interleave them through the FSM, since
+ * the goal is per-kernel quantization error, not detection-loop behavior. */
 int main(void)
 {
     named_metric_t audio_table[MAX_KERNELS];
