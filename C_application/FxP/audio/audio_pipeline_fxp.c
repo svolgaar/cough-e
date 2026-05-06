@@ -16,7 +16,9 @@
 /*  Audio RMS and crest factor                                                */
 /* -------------------------------------------------------------------------- */
 
-// RMS for centered audio, input is Q2.14 and output is UQ18.14.
+// RMS for centered audio. Input samples are Q2.14; mean is Q18.14;
+// output is UQ18.14. Squared energy is accumulated in UQ4.28 and
+// downshifted by powers of two only when needed to avoid overflow.
 static uq18_14_t _rms_audio(const q2_14_t *sig, int16_t len, q18_14_t mean) {
     if (len <= 0) return 0;
 
@@ -44,6 +46,8 @@ static uq18_14_t _rms_audio(const q2_14_t *sig, int16_t len, q18_14_t mean) {
     return fxp_sqrt32(mean_energy) << (energy_shift >> 1U);
 }
 
+// Compute RMS and crest factor on DC-centered Q2.14 audio.
+// Crest factor is positive peak over centered RMS, returned in pipeline Q format.
 void audio_crest_factor(const int8_t *features_selector, const int16_t *sig, int16_t len,
                         fxp_feat_t *feats) {
     if ((!features_selector[ROOT_MEANS_SQUARED] && !features_selector[CREST_FACTOR]) || len <= 0) {
@@ -77,7 +81,7 @@ void audio_crest_factor(const int8_t *features_selector, const int16_t *sig, int
 #define FFT_ROLLOFF ((uint32_t)62259U)
 
 /* Frequency deviation from the spectral centroid.
- * Frequency is UQ12.20 and centroid is UQ11.21, so both are converted to Q13.19
+ * Frequency is UQ12.20 and centroid is UQ11.21; both are converted to Q13.19
  * before subtracting.
  */
 static inline q13_19_t _dev(uq12_20_t freq_q20, uq11_21_t centroid_q21) {
@@ -86,14 +90,14 @@ static inline q13_19_t _dev(uq12_20_t freq_q20, uq11_21_t centroid_q21) {
     return (q13_19_t)(freq_q19 - centroid_q19);
 }
 /* Spectral rolloff: first frequency bin where the running magnitude reaches
- * 95% of the total magnitude. Magnitudes are accumulated as UQ15.17 to match
- * sum_mags.
+ * 95% of the total magnitude. Magnitudes are UQ12.20 and are shifted to
+ * UQ15.17 while accumulating to match sum_mags.
  */
 static uq12_20_t _rolloff(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t len,
                           uq15_17_t sum_mags) {
-    // Add half a Q16 step before shifting so the 0.95 multiply rounds instead of flooring.
-    uq15_17_t rolloff_energy =
-        (uq15_17_t)((((uint64_t)sum_mags * (uint64_t)FFT_ROLLOFF) + (1ULL << 15)) >> 16);
+    // Compute 95% as sum - round(sum / 20) to avoid a 32-bit overflow from
+    // sum_mags * 0.95_q16 before the final shift.
+    uq15_17_t rolloff_energy = (uq15_17_t)(sum_mags - ((sum_mags + 10U) / 20U));
 
     uq15_17_t sum = 0;
     for (int16_t i = 0; i < len; i++) {
@@ -106,8 +110,8 @@ static uq12_20_t _rolloff(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t
 }
 
 /* Spectral centroid: weighted mean frequency, sum(freq * magnitude) / sum(magnitude).
- * The product UQ12.20 * UQ12.20 is shifted to UQ26.38 before accumulation;
- * dividing by UQ15.17 produces UQ11.21.
+ * The product UQ12.20 * UQ12.20 is UQ24.40, then shifted to UQ26.38
+ * before accumulation. Dividing by UQ15.17 produces UQ11.21.
  */
 static uq11_21_t _centroid(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t len,
                            uq15_17_t sum_mags) {
@@ -118,12 +122,13 @@ static uq11_21_t _centroid(const uq12_20_t *mags, const uq12_20_t *freqs, int16_
         sum += (uq26_38_t)(product >> 2U);
     }
 
-    uq11_21_t centroid = (sum) / (uint64_t)sum_mags;
+    uq11_21_t centroid = (uq11_21_t)(sum / sum_mags);
     return centroid;
 }
 /* Spectral spread: sqrt of the magnitude-weighted variance around centroid.
- * dev^2 is kept as UQ25.7, multiplied by magnitude UQ12.20, then divided by
- * sum_mags to produce a UQ22.10 sqrt input and UQ11.5 output.
+ * dev is Q13.19, so dev^2 starts as UQ26.38 and is shifted to UQ25.7.
+ * Multiplying by magnitude UQ12.20 gives UQ37.27; dividing by sum_mags
+ * UQ15.17 produces UQ22.10, whose sqrt is UQ11.5.
  */
 static uq11_5_t _spread(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t len,
                         uq15_17_t sum_mags, uq11_21_t centroid) {
@@ -139,12 +144,13 @@ static uq11_5_t _spread(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t l
     return (uq11_5_t)fxp_sqrt32(mean);
 }
 /* Spectral kurtosis: magnitude-weighted mean of normalized fourth powers.
- * inv_spread lets each deviation be normalized before raising it to the fourth
- * power, keeping the intermediate integer range manageable.
+ * inv_spread is UQ12.20 and dev is Q13.19; their product is shifted to Q5.11.
+ * Squaring twice gives UQ10.22 then UQ20.12, which is weighted by magnitude
+ * UQ12.20 and divided by sum_mags UQ15.17 to produce UQ17.15.
  */
 static uq17_15_t _kurtosis(const uq12_20_t *mags, const uq12_20_t *freqs, int16_t len,
                            uq15_17_t sum_mags, uq11_21_t centroid, uq11_5_t spread) {
-
+    // 2^25 / UQ11.5 gives an inverse spread in UQ12.20.
     uq12_20_t inv_spread = (uq12_20_t)((1U << 25) / (uint32_t)spread);
     uq32_32_t sum = 0;
     for (int16_t i = 0; i < len; i++) {
@@ -242,15 +248,16 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
         free(cfg);
         return;
     }
-    // this type is used solely to be compatible with the kiss_fft library and not modify it
-    //  the type kiss_fft_scalar should be interpreted as a Q2.30 format
-    //  to use 32 bit twiddle factors, this is necessary
+    // KissFFT uses kiss_fft_scalar for both samples and twiddles; in fixed-point
+    // mode this pipeline treats it as Q2.30, so Q2.14 audio is widened here.
     for (int16_t i = 0; i < len; i++) {
         sig_q[i] = (kiss_fft_scalar)((int32_t)sig[i] << 16);
     }
-    // Below here are the RFFT kernel features.
+
     kiss_fftr(cfg, sig_q, cx_out);
 
+    // Convert the shared RFFT output into magnitudes and frequency bins used by
+    // rolloff, centroid, spread, and kurtosis.
     uq15_17_t sum = 0;
     for (int16_t i = 0; i < fft_len; i++) {
         // Convert KissFFT output from Q2.30 to Q12.20.
@@ -265,6 +272,14 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
     }
 
     uq15_17_t sum_mags = (uq15_17_t)sum;
+    if (sum_mags == 0U) {
+        free(sig_q);
+        free(cx_out);
+        free(mags);
+        free(freqs);
+        free(cfg);
+        return;
+    }
 
     // Below are all the FFT feature kernel calls.
     if (need_rolloff) {
@@ -288,7 +303,7 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
         }
     }
 
-    if (need_kurt) {
+    if (need_kurt && spread != 0U) {
         uq17_15_t kurtosis = _kurtosis(mags, freqs, fft_len, sum_mags, centroid, spread);
         feats[SPECTRAL_KURTOSIS] = (fxp_feat_t)kurtosis;
     }
@@ -305,18 +320,18 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
 /* -------------------------------------------------------------------------- */
 
 /* Composite Simpson's rule over an even number of intervals.
- * Proxy samples UQ21.11 are shifted down to integer units so the running sum
- * fits in u32 before the final divide-by-3.
+ * Proxy samples are UQ21.11 and are shifted to UQ24.8 before accumulation so
+ * the weighted sum fits in u32 before the final divide-by-3.
  */
-static uint32_t _psd_simpson_step(const uq21_11_t *x, int16_t start, int16_t end) {
+static uq24_8_t _psd_simpson_step(const uq21_11_t *x, int16_t start, int16_t end) {
     int n_intervals = (end - start) / 2;
     int16_t idx = start;
-    uint32_t sum = 0;
+    uq24_8_t sum = 0;
 
     for (int i = 0; i < n_intervals; i++) {
-        uint32_t x0 = (uint32_t)(x[idx] >> 3U);
-        uint32_t x1 = (uint32_t)(x[idx + 1] >> 3U);
-        uint32_t x2 = (uint32_t)(x[idx + 2] >> 3U);
+        uq24_8_t x0 = (uq24_8_t)(x[idx] >> 3U);
+        uq24_8_t x1 = (uq24_8_t)(x[idx + 1] >> 3U);
+        uq24_8_t x2 = (uq24_8_t)(x[idx + 2] >> 3U);
         sum += x0 + (x1 << 2) + x2;
         idx += 2;
     }
@@ -324,19 +339,15 @@ static uint32_t _psd_simpson_step(const uq21_11_t *x, int16_t start, int16_t end
     return (sum + 1U) / 3U;
 }
 
-/* Numerical integral of the proxy spectrum.
- * For odd lengths Simpson's rule applies directly; for even lengths the last
- * interval is split off as a trapezoid average so the rule's even-interval
- * requirement is preserved on both halves.
- */
-static uint32_t _psd_simpson(const uq21_11_t *x, int16_t len) {
+// Numerical integral of the proxy spectrum.
+static uq24_8_t _psd_simpson(const uq21_11_t *x, int16_t len) {
     if (!x || len <= 1) return 0U;
 
     if ((len & 1) == 0) {
-        uint32_t val = (((uint32_t)(x[len - 1] >> 3U) + (uint32_t)(x[len - 2] >> 3U)) + 1U) >> 1;
-        uint32_t result = _psd_simpson_step(x, 0, len - 1);
+        uq24_8_t val = (((uq24_8_t)(x[len - 1] >> 3U) + (uq24_8_t)(x[len - 2] >> 3U)) + 1U) >> 1;
+        uq24_8_t result = _psd_simpson_step(x, 0, len - 1);
 
-        val += ((((uint32_t)(x[0] >> 3U) + (uint32_t)(x[1] >> 3U)) + 1U) >> 1);
+        val += ((((uq24_8_t)(x[0] >> 3U) + (uq24_8_t)(x[1] >> 3U)) + 1U) >> 1);
         result += _psd_simpson_step(x, 1, len);
 
         val = (val + 1U) >> 1;
@@ -363,29 +374,68 @@ static uq12_20_t _dominant_freq(const uq21_11_t *proxy, const uq12_20_t *freqs, 
 }
 
 /* Spectral flatness: exp(mean(log(power)) - log(mean(power))).
- * Proxy input is UQ21.11, logs are Q21.11, and the output ratio is UQ0.16.
+ * Proxy input is UQ21.11, but typical proxy values span many orders of
+ * magnitude, so small bins quantize to zero. Pre-scale every bin by the same
+ * left shift so the largest fits just under 2^31; the shift adds the same
+ * s*ln(2) to mean_log and to log_mean_proxy and cancels in the difference.
+ * Logs are Q21.11, the difference fits in Q5.11, and the output ratio is UQ0.16.
  */
 static uq0_16_t _flatness(const uq21_11_t *proxy, int16_t len) {
-    int64_t sum_logs = 0;
-    uq21_11_t mean_proxy = 0;
+    // Find the largest bin so we can pick a per-array left shift that lifts
+    // the rest of the bins out of the UQ21.11 quantization floor. PSD proxy
+    // values span many orders of magnitude; without a shift, anything below
+    // 2^-11 collapses to 0 and the log term loses most of its dynamic range.
+    uq21_11_t max_proxy = 0;
+    for (int16_t i = 0; i < len; i++) {
+        if (proxy[i] > max_proxy) max_proxy = proxy[i];
+    }
+    if (max_proxy == 0U) return 0;
+
+    // Pick the largest shift that keeps max_proxy strictly inside uint32.
+    // Stopping at 2^30 leaves one bit of headroom for the streaming-mean
+    // updates so v - mean_scaled cannot overflow.
+    uint8_t scale = 0;
+    while ((max_proxy << scale) < (1U << 30) && scale < 31U) scale++;
+
+    // Both the log accumulator and the streaming arithmetic mean operate on
+    // the shifted values. The shift adds the same constant s*ln(2) to
+    // mean(log(x)) and to log(mean(x)), so it cancels in the final diff and
+    // does not need to be tracked explicitly.
+    int32_t sum_logs = 0;
+    uq21_11_t mean_scaled = 0;
 
     for (int16_t i = 0; i < len; i++) {
-        uq21_11_t v = (proxy[i] == 0U) ? 1U : proxy[i];
+        // Apply the per-array shift. Anything still rounding to 0 after the
+        // shift is clamped to 1 LSB so _log_psd never sees a zero input.
+        uq21_11_t v = proxy[i] << scale;
+        if (v == 0U) v = 1U;
         sum_logs += _log_psd(v);
+
+        // Streaming arithmetic mean: mean_n = mean_{n-1} + (v - mean) / n.
+        // Branching on sign avoids underflowing the unsigned difference;
+        // truncated integer division is biased toward zero in either case
+        // but keeps the running mean within UQ21.11 without a 64-bit accum.
         uint32_t n = (uint32_t)i + 1U;
-        if (v >= mean_proxy) {
-            mean_proxy += (v - mean_proxy) / n;
+        if (v >= mean_scaled) {
+            mean_scaled += (v - mean_scaled) / n;
         } else {
-            mean_proxy -= (mean_proxy - v) / n;
+            mean_scaled -= (mean_scaled - v) / n;
         }
     }
 
-    if (mean_proxy == 0U) return 0;
+    if (mean_scaled == 0U) return 0;
 
+    // mean_log and log_mean_scaled are both shifted by s*ln(2) in Q21.11, so
+    // their difference recovers the true ln(flatness) regardless of scale.
     q21_11_t mean_log = (q21_11_t)(sum_logs / (int32_t)len);
-    q21_11_t log_mean_proxy = _log_psd(mean_proxy);
-    q5_11_t diff = (q5_11_t)(mean_log - log_mean_proxy);
+    q21_11_t log_mean_scaled = _log_psd(mean_scaled);
+    int32_t diff = (int32_t)mean_log - (int32_t)log_mean_scaled;
+    // Flatness is bounded above by 1, so a positive diff can only come from
+    // numerical noise; clamp it to 0. Saturate the lower end into Q5.11 since
+    // _exp_psd takes int16. exp(diff < INT16_MIN/2048 ≈ -16) underflows to 0
+    // anyway, so the saturation cannot change the UQ0.16 result.
     if (diff > 0) diff = 0;
+    if (diff < INT16_MIN) diff = INT16_MIN;
     return _exp_psd((q5_11_t)diff);
 }
 
@@ -401,7 +451,7 @@ static void _bandpowers(const uq21_11_t *proxy, const uq12_20_t *freqs, int16_t 
 
     if (!proxy || !freqs || !psd_selector || len <= 2) return;
 
-    uq24_8_t total_power = (uq24_8_t)_psd_simpson(proxy, len);
+    uq24_8_t total_power = _psd_simpson(proxy, len);
     if (total_power == 0U) return;
 
     for (int8_t i = 0; i < N_PSD; i++) {
@@ -432,7 +482,7 @@ static void _bandpowers(const uq21_11_t *proxy, const uq12_20_t *freqs, int16_t 
             continue;
         }
 
-        uq24_8_t band_power = (uq24_8_t)_psd_simpson(&proxy[start_idx], n_bins);
+        uq24_8_t band_power = _psd_simpson(&proxy[start_idx], n_bins);
         uq10_6_t ratio =
             (uq10_6_t)((((uint64_t)band_power << 16) + (total_power >> 1)) / total_power);
         band_powers[i] = ratio;
@@ -829,7 +879,6 @@ int audio_mel_stage_probe(const int8_t *features_selector, const int16_t *sig, i
         (uq20_44_t *)malloc((size_t)n_mels_needed * (size_t)n_frames * sizeof(uq20_44_t));
     probe->mel_db_q9 =
         (int32_t *)malloc((size_t)n_mels_needed * (size_t)n_frames * sizeof(int32_t));
-    uint64_t *frame_power_entropy = (uint64_t *)malloc((size_t)FFT_RES_LEN * sizeof(uint64_t));
     uint64_t *mel_entropy_power =
         (uint64_t *)malloc((size_t)n_mels_needed * (size_t)n_frames * sizeof(uint64_t));
 
@@ -837,8 +886,8 @@ int audio_mel_stage_probe(const int8_t *features_selector, const int16_t *sig, i
     kiss_fft_cpx *cx_out = (kiss_fft_cpx *)malloc((size_t)FFT_RES_LEN * sizeof(kiss_fft_cpx));
     kiss_fftr_cfg cfg = kiss_fftr_alloc(N_FFT, 0, 0, 0);
 
-    if (!probe->frame_power || !probe->mel_power || !probe->mel_db_q9 || !frame_power_entropy ||
-        !mel_entropy_power || !timedata || !cx_out || !cfg) {
+    if (!probe->frame_power || !probe->mel_power || !probe->mel_db_q9 || !mel_entropy_power ||
+        !timedata || !cx_out || !cfg) {
         audio_mel_stage_probe_free(probe);
         free(mel_entropy_power);
         free(timedata);
@@ -883,7 +932,6 @@ int audio_mel_stage_probe(const int8_t *features_selector, const int16_t *sig, i
             uq20_44_t im_2 = (uq20_44_t)((int64_t)im * (int64_t)im);
             uq20_44_t p = re_2 + im_2;
             frame_power[k] = p;
-
         }
 
         // Apply the requested mel rows and keep both mel power and dB.
@@ -893,7 +941,6 @@ int audio_mel_stage_probe(const int8_t *features_selector, const int16_t *sig, i
             int16_t end = fxp_mel_nz_indexes[mel_idx][1];
 
             uq20_44_t sum = 0;
-            uint64_t entropy_sum = 0;
             for (int16_t k = start; k <= end; k++) {
                 uq1_15_t w_q15 = fxp_mel_basis_q15[mel_idx][k - start];
                 sum += (frame_power[k] * (uint64_t)w_q15) >> FXP_MEL_BASIS_FRAC;
@@ -902,7 +949,7 @@ int audio_mel_stage_probe(const int8_t *features_selector, const int16_t *sig, i
             size_t idx = (size_t)m * (size_t)n_frames + (size_t)f;
             int32_t db = _mel_db(sum, MEL_DB_OFFSET);
             probe->mel_power[idx] = sum;
-            mel_entropy_power[idx] = esum;
+            mel_entropy_power[idx] = sum;
             probe->mel_db_q9[idx] = db;
             if (db > max_db) max_db = db;
         }
