@@ -37,7 +37,7 @@
 #define COUGH_EXP_MIN_MS                    200U
 #define COUGH_EXP_MAX_MS                    500U
 #define COMPRESSIVE_PHASE_MS                200U
-#define COUGH_LEN_IN_SERIES_DECREASE_FACTOR_Q15 26214U /* 0.8 in Q15 */
+#define COUGH_LEN_IN_SERIES_DECREASE_FACTOR_FXP 26214U /* 0.8 in signed 1.15 fixed-point */
 #endif
 
 #ifdef FXP_MODE

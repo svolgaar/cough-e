@@ -92,13 +92,6 @@ typedef uint64_t uq32_32_t;
 /* -------------------------------------------------------------------------- */
 
 
-static inline int32_t fxp_floor_div_s64(int64_t num, int32_t den) {
-    int64_t q = num / (int64_t)den;
-    int64_t r = num - q * (int64_t)den;
-    if (r != 0 && num < 0) q -= 1;
-    return (int32_t)q;
-}
-
 static inline uint32_t _fxp_isqrt32(uint32_t x) {
     if (x == 0) return 0;
     uint32_t bits = 32U - (uint32_t)__builtin_clz(x);

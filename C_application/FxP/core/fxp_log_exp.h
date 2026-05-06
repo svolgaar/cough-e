@@ -622,9 +622,12 @@ static inline q21_11_t _log_psd(uq21_11_t x)
 static inline uq0_16_t _exp_psd(q5_11_t x)
 {
     int64_t input = (int64_t)x << 13;
-    int32_t exponent = fxp_floor_div_s64(input, FXP_LN2_Q24);
+    int32_t exponent = (int32_t)(input / (int64_t)FXP_LN2_Q24);
     int64_t remainder = input - (int64_t)exponent * (int64_t)FXP_LN2_Q24;
-    if (remainder < 0) remainder = 0;
+    if (remainder < 0) {
+        exponent--;
+        remainder += FXP_LN2_Q24;
+    }
 
     uint32_t frac = (uint32_t)(((uint64_t)remainder << 24) / (uint32_t)FXP_LN2_Q24);
     if (frac >= (1U << 24)) {
