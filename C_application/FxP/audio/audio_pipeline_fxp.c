@@ -482,6 +482,8 @@ static void _bandpowers(const uq21_11_t *proxy, const uq12_20_t *freqs, int16_t 
             continue;
         }
 
+        // band_power and total_power are both UQ24.8, so the ratio is unitless.
+        // Shift by 16 first to land in UQ0.16, with a half-LSB rounding term.
         uq24_8_t band_power = _psd_simpson(&proxy[start_idx], n_bins);
         uq10_6_t ratio =
             (uq10_6_t)((((uint64_t)band_power << 16) + (total_power >> 1)) / total_power);
@@ -558,6 +560,9 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
 
         kiss_fftr(cfg, timedata, cx_out);
 
+        // Squared magnitude per bin. KissFFT output is Q2.30; shifting by 22
+        // narrows it to Q8.8 so the squared product fits in UQ16.16. The final
+        // shift to UQ21.11 leaves headroom for the per-segment accumulation.
         for (int16_t i = 0; i < psd_len; i++) {
             q8_8_t re = (q8_8_t)(cx_out[i].r >> 22);
             q8_8_t im = (q8_8_t)(cx_out[i].i >> 22);
@@ -571,6 +576,9 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
         start = (int16_t)(start + hop);
     }
 
+    // Accumulated power is the proxy used by every PSD kernel; the missing
+    // 1/(fs*sum(window^2)) and 1/n_segments factors cancel in flatness and
+    // bandpower ratios and do not affect the dominant-frequency argmax.
     for (int16_t i = 0; i < psd_len; i++) {
         proxy[i] = acc_power[i];
         uq12_20_t freq = (uq12_20_t)((((uint64_t)i * (uint64_t)fs) << 20U) / (uint64_t)NPERSEG);
@@ -658,6 +666,10 @@ static uint16_t _mel_entropy(const uq20_44_t *row_power, int16_t n_frames) {
         uint64_t power = row_power[t];
         if (power == 0 || power >= sum) continue;
 
+        // Long-division of power/sum into a UQ0.16 probability without a
+        // 64-bit divide. Each iteration doubles the remainder and tests
+        // whether 2*rem >= sum (written as rem >= sum-rem to avoid overflow);
+        // a final compare provides round-to-nearest on the discarded bit.
         uint32_t p = 0;
         uint64_t rem = power;
         for (uint8_t bit = 0; bit < 16U; bit++) {
@@ -672,10 +684,16 @@ static uint16_t _mel_entropy(const uq20_44_t *row_power, int16_t n_frames) {
         if (rem >= (sum - rem) && p < UINT16_MAX) p++;
         if (p == 0U) continue;
 
+        // _log_mel_power returns ln(p_raw) in Q7.9 where p_raw is a UQ0.16
+        // integer (so p_raw = p * 2^16). Subtract 16*ln(2) to recover the
+        // ln(p) of the true UQ0.16 probability. Numerical noise can push
+        // ln_p slightly positive when p ≈ 1; clamp to 0 so -ln_p stays >= 0.
         q7_9_t ln_p = (q7_9_t)((int32_t)_log_mel_power((uint64_t)p) -
                                (16 * ((FXP_LN2_Q24 + (1 << 14)) >> 15)));
         if (ln_p > 0) ln_p = 0;
 
+        // p * -ln_p is UQ0.16 * Q7.9 = Q7.25; shift by 11 with rounding to
+        // accumulate the row entropy in Q2.14.
         int32_t prod = (int32_t)p * (int32_t)(-ln_p);
         entropy += (prod + (1 << 10)) >> 11;
     }
@@ -793,6 +811,8 @@ void audio_mel_features(const int8_t *features_selector, const int16_t *sig, int
         q21_11_t row_sum = 0;
         q7_9_t row_max = INT16_MIN;
 
+        // First pass: clamp to the top_db floor and gather sum + max in one
+        // sweep. Promoting to Q21.11 keeps headroom for n_frames * Q7.9.
         for (int16_t f = 0; f < n_frames; f++) {
             size_t idx = (size_t)m * (size_t)n_frames + (size_t)f;
             q7_9_t db = (q7_9_t)((mel_db[idx] < clip) ? clip : mel_db[idx]);
@@ -804,6 +824,8 @@ void audio_mel_features(const int8_t *features_selector, const int16_t *sig, int
         q7_9_t mean = (q7_9_t)((row_sum / n_frames) >> 2);
 
         // Variance is accumulated as Q18.14, then restored to Q14.18 for sqrt -> Q7.9.
+        // dev is Q7.9, so dev^2 is UQ14.18 and is shifted to UQ18.14 before
+        // accumulation so the running sum cannot overflow.
         uq18_14_t sum = 0;
         for (int16_t f = 0; f < n_frames; f++) {
             q7_9_t dev =
