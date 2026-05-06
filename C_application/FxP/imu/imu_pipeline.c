@@ -84,7 +84,8 @@ static uq7_9_t _line_length_l2g(const uq5_11_t *sig, int16_t len) {
 
     uq7_9_t sum = 0;
     for (int16_t i = 0; i < len - 1; i++) {
-        // Absolute sample-to-sample difference, converted from UQ5.11 to UQ7.9.
+        // Two-step shift via UQ6.10 keeps an LSB of headroom for the running
+        // sum: a single >> 2 would round each diff down twice as harshly.
         uq6_10_t diff = (uq6_10_t)_abs_delta_l2g(sig[i + 1], sig[i]) >> 1U;
         sum += (uq7_9_t)(diff >> 1U);
     }
@@ -111,17 +112,19 @@ static q10_22_t _kurtosis(const q11_5_t *sig, int16_t len) {
     }
     q11_5_t mean = _kurtosis_mean(sum_mean, len);
 
+    // Numerator and denominator paths share dev^2 but need it in different
+    // formats. The numerator (sum of dev^4) wants the full UQ22.10 product to
+    // preserve precision, while the denominator path squares again later and
+    // needs the wider UQ10.22 form so that variance and stddev fit cleanly.
     uq10_22_t sum_var = 0;
     uq44_20_t sum_dev_4 = 0;
     for (int16_t i = 0; i < len; i++) {
         q11_5_t dev = _kurtosis_dev(sig[i], mean);
 
-        // this one is used for the numerator of kurtosis
         uq22_10_t dev_2_num = (uq22_10_t)(((int32_t)dev * (int32_t)dev));
         uq44_20_t dev_4_num = (uq44_20_t)(((uint64_t)dev_2_num * (uint64_t)dev_2_num));
         sum_dev_4 += dev_4_num;
 
-        // this one is for the denominator of kurtosis
         uq10_22_t dev_2_denom = (uq10_22_t)(dev_2_num << 12U);
         sum_var += dev_2_denom;
     }
@@ -159,6 +162,8 @@ uq10_6_t imu_l2a(q11_5_t ax, q11_5_t ay, q11_5_t az) {
                     (uq22_10_t)((int32_t)ay * (int32_t)ay) +
                     (uq22_10_t)((int32_t)az * (int32_t)az);
 
+    // sum is UQ22.10; sqrt would yield UQ11.5, so the pre-shift by 2 picks up
+    // one extra fractional bit to land on UQ10.6.
     return (uq10_6_t)fxp_sqrt32(sum << 2U);
 }
 
@@ -168,6 +173,9 @@ uq5_11_t imu_l2g(q11_5_t gx, q11_5_t gy, q11_5_t gz) {
                     (uq22_10_t)((int32_t)gy * (int32_t)gy) +
                     (uq22_10_t)((int32_t)gz * (int32_t)gz);
 
+    // Gyro norms are typically small relative to the accel norm, so we burn
+    // the extra headroom on fractional bits: shift by 12 lifts sum to UQ10.22
+    // before sqrt, giving a UQ5.11 result.
     return (uq5_11_t)fxp_sqrt32(sum << 12U);
 }
 
@@ -177,7 +185,7 @@ typedef struct {
     int16_t last;
 } azc_segment_t;
 
-/* AZC uses fixed-point sample values only for distance comparisons.
+/* Approximate Zero Crossing (AZC). Th
  * The returned feature is an integer count, so its fractional width is 0.
  */
 static inline int32_t _azc_sample(const void *sig, int16_t idx, uint8_t is_signed)
@@ -196,7 +204,7 @@ static inline int8_t _azc_slope_sign(const void *sig, int16_t a_idx, int16_t b_i
     if (b < a) return -1;
     return 0;
 }
-
+ 
 static uint32_t _azc_max_vdist(const void *sig, int16_t first, int16_t last,
                                uint8_t is_signed, int16_t *idx)
 {
@@ -248,7 +256,7 @@ static int16_t *_azc_polygonal_approx(const void *sig, int16_t len, uint8_t is_s
         uint32_t max_dist = _azc_max_vdist(sig, first, last, is_signed, &mid);
 
         if (max_dist > eps_fxp) {
-            stack[next + 1].first = first;
+                        stack[next + 1].first = first;
             stack[next + 1].last = mid;
             stack[next + 2].first = mid;
             stack[next + 2].last = last;
