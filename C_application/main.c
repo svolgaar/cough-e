@@ -77,14 +77,14 @@ int main(void)
     feat_t bmi_feature = 0;
 
 #ifdef FXP_MODE
-    int16_t *audio_in_q14 = (int16_t *)malloc((size_t)AUDIO_LEN * sizeof(int16_t));
-    q11_5_t (*imu_in_q5)[Num_IMU_signals] = (q11_5_t(*)[Num_IMU_signals])malloc((size_t)IMU_LEN * sizeof(*imu_in_q5));
+    int16_t *audio = (int16_t *)malloc((size_t)AUDIO_LEN * sizeof(int16_t));
+    q11_5_t (*imu)[Num_IMU_signals] = (q11_5_t(*)[Num_IMU_signals])malloc((size_t)IMU_LEN * sizeof(*imu));
     const audio_sample_t *audio_runtime_in = NULL;
     const imu_sample_t (*imu_runtime_in)[Num_IMU_signals] = NULL;
 
-    if (!audio_in_q14 || !imu_in_q5) {
-        free(audio_in_q14);
-        free(imu_in_q5);
+    if (!audio || !imu) {
+        free(audio);
+        free(imu);
         free(indexes_audio_f);
         free(indexes_imu_f);
         free(audio_feature_array);
@@ -101,16 +101,16 @@ int main(void)
 
     /* Single runtime boundary: source float samples are converted once to FxP carriers. */
     for (int32_t i = 0; i < AUDIO_LEN; i++) {
-        audio_in_q14[i] = cough_source_audio_sample(audio_in.air[i]);
+        audio[i] = cough_source_audio_sample(audio_in.air[i]);
     }
     for (int32_t i = 0; i < IMU_LEN; i++) {
         for (int8_t ax = 0; ax < Num_IMU_signals; ax++) {
-            imu_in_q5[i][ax] = cough_source_imu_sample(imu_in[i][ax]);
+            imu[i][ax] = cough_source_imu_sample(imu_in[i][ax]);
         }
     }
 
-    audio_runtime_in = audio_in_q14;
-    imu_runtime_in = imu_in_q5;
+    audio_runtime_in = audio;
+    imu_runtime_in = imu;
     gender_feature = cough_source_feat(gender);
     bmi_feature = cough_source_feat(bmi);
 #else
@@ -254,8 +254,8 @@ int main(void)
     free(audio_confidence);
 
 #ifdef FXP_MODE
-    free(audio_in_q14);
-    free(imu_in_q5);
+    free(audio);
+    free(imu);
 #endif
 
     return 0;

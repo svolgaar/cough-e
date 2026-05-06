@@ -562,25 +562,25 @@ static int fxp_is_required(const int8_t *features_selector, uint16_t start_index
 }
 
 void audio_features(const int8_t *features_selector,
-                    const int16_t *sig_q14,
+                    const q2_14_t *sig,
                     int16_t len,
                     int16_t fs,
                     fxp_feat_t *feats)
 {
-    if (!features_selector || !sig_q14 || !feats || len <= 0 || fs <= 0) return;
+    if (!features_selector || !sig || !feats || len <= 0 || fs <= 0) return;
 
-    audio_fft_features(features_selector, sig_q14, len, fs, feats);
-    audio_psd_features(features_selector, sig_q14, len, fs, feats);
-    audio_mel_features(features_selector, sig_q14, len, feats);
-    audio_crest_factor(features_selector, sig_q14, len, feats);
+    audio_fft_features(features_selector, sig, len, fs, feats);
+    audio_psd_features(features_selector, sig, len, fs, feats);
+    audio_mel_features(features_selector, sig, len, feats);
+    audio_crest_factor(features_selector, sig, len, feats);
 }
 
 void imu_features(const int8_t *features_selector,
-                  const q11_5_t sig_raw[][Num_IMU_signals],
+                  const q11_5_t sig[][Num_IMU_signals],
                   int16_t len,
                   fxp_feat_t *feats)
 {
-    if (!features_selector || !sig_raw || !feats || len <= 0) return;
+    if (!features_selector || !sig || !feats || len <= 0) return;
 
     uq10_6_t *combo_l2a = (uq10_6_t *)malloc((size_t)len * sizeof(*combo_l2a));
     uq5_11_t *combo_l2g = (uq5_11_t *)malloc((size_t)len * sizeof(*combo_l2g));
@@ -593,8 +593,8 @@ void imu_features(const int8_t *features_selector,
     }
 
     for (int16_t i = 0; i < len; i++) {
-        combo_l2a[i] = imu_l2a(sig_raw[i][0], sig_raw[i][1], sig_raw[i][2]);
-        combo_l2g[i] = imu_l2g(sig_raw[i][3], sig_raw[i][4], sig_raw[i][5]);
+        combo_l2a[i] = imu_l2a(sig[i][0], sig[i][1], sig[i][2]);
+        combo_l2g[i] = imu_l2g(sig[i][3], sig[i][4], sig[i][5]);
     }
 
     const int8_t axis_ids[Num_IMU_signals] = {
@@ -611,7 +611,7 @@ void imu_features(const int8_t *features_selector,
         if (!fxp_is_required(features_selector, base, (uint16_t)(base + Num_imu_feat_families - 1))) continue;
 
         for (int16_t i = 0; i < len; i++) {
-            axis_samples[i] = sig_raw[i][axis_ids[s]];
+            axis_samples[i] = sig[i][axis_ids[s]];
         }
         imu_run_raw_features(&features_selector[base], axis_samples, len, &feats[base]);
     }
