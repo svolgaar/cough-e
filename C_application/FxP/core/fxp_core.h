@@ -24,7 +24,7 @@
 #define FXP_FRAC_AUDIO_FFT_SPREAD 5
 #define FXP_FRAC_AUDIO_FFT_KURTOSIS 15
 
-#define FXP_FRAC_AUDIO_PSD_PROXY 28
+#define FXP_FRAC_AUDIO_PSD_PROXY 23
 #define FXP_FRAC_AUDIO_PSD_INTEGRAL 20
 #define FXP_FRAC_AUDIO_PSD_FLATNESS 16
 #define FXP_FRAC_AUDIO_PSD_BANDPOWER 16
@@ -77,15 +77,20 @@ typedef uint32_t uq14_18_t;
 typedef uint32_t uq24_8_t;
 typedef uint32_t uq18_14_t;
 typedef uint32_t uq4_28_t;
+typedef uint32_t uq2_30_t;
 typedef uint32_t uq9_23_t;
 typedef uint32_t uq7_25_t;
 
 /* 64-bit aliases */
+typedef uint64_t uq4_60_t;
+typedef uint64_t uq14_50_t;
 typedef uint64_t uq20_44_t;
 typedef uint64_t uq16_48_t;
 typedef uint64_t uq8_56_t;
 typedef uint64_t uq18_46_t;
 typedef uint64_t uq22_40_t;
+typedef uint64_t uq27_37_t;
+typedef uint64_t uq27_37;
 typedef uint64_t uq29_35_t;
 typedef uint64_t uq45_19_t;
 typedef uint64_t uq44_20_t;

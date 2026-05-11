@@ -84,14 +84,13 @@ void audio_crest_factor(const int8_t *features_selector, const int16_t *sig, int
  * Frequency is UQ12.20 and centroid is UQ11.21; both are converted to Q13.19
  * before subtracting.
  */
-static inline q13_19_t _dev(uq12_20_t freq_q20, uq11_21_t centroid_q21) {
-    q13_19_t freq_q19 = (q13_19_t)(freq_q20 >> 1);
-    q13_19_t centroid_q19 = (q13_19_t)(centroid_q21 >> 2);
+static inline q13_19_t _dev(uq12_20_t freq, uq11_21_t centroid) {
+    q13_19_t freq_q19 = (q13_19_t)(freq >> 1);
+    q13_19_t centroid_q19 = (q13_19_t)(centroid >> 2);
     return (q13_19_t)(freq_q19 - centroid_q19);
 }
 /* Spectral rolloff: first frequency bin where the running magnitude reaches
- * 95% of the total magnitude. Magnitudes are UQ4.28 and are shifted to
- * UQ7.25 while accumulating to match sum_mags.
+ * 95% of the total magnitude. Magnitudes and their sum use UQ2.30.
  */
 static uq12_20_t _rolloff(const uq4_28_t *mags, const uq12_20_t *freqs, int16_t len,
                           uq7_25_t sum_mags) {
@@ -197,11 +196,6 @@ int audio_fft_stage_probe(const int16_t *sig, int16_t len, int16_t fs, uq4_28_t 
 
     uq7_25_t sum = 0;
     for (int16_t i = 0; i < fft_len; i++) {
-        // Baseline:
-        //   q12_20_t re = (q12_20_t)(cx_out[i].r >> 10);
-        //   q12_20_t im = (q12_20_t)(cx_out[i].i >> 10);
-        //   uq12_20_t mag = sqrt(re*re + im*im);
-        //
         // Fixed KissFFT is scaled by 1/len; the observed 6400-point FFT bins
         // fit in Q4.28, preserving 8 more fractional bits for weak bins.
         q4_28_t re = (q4_28_t)(cx_out[i].r >> 2);
@@ -266,11 +260,6 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
     // rolloff, centroid, spread, and kurtosis.
     uq7_25_t sum = 0;
     for (int16_t i = 0; i < fft_len; i++) {
-        // Baseline:
-        //   q12_20_t re = (q12_20_t)(cx_out[i].r >> 10);
-        //   q12_20_t im = (q12_20_t)(cx_out[i].i >> 10);
-        //   uq12_20_t mag = sqrt(re*re + im*im);
-        //
         // Fixed KissFFT is scaled by 1/len; the observed 6400-point FFT bins
         // fit in Q4.28, preserving 8 more fractional bits for weak bins.
         q4_28_t re = (q4_28_t)(cx_out[i].r >> 2);
@@ -332,18 +321,18 @@ void audio_fft_features(const int8_t *features_selector, const int16_t *sig, int
 /* -------------------------------------------------------------------------- */
 
 /* Composite Simpson's rule over an even number of intervals.
- * Proxy samples are UQ4.28. The local SR(8) gives a UQ12.20 integration
+ * Proxy samples are UQ9.23. The local shift gives a UQ12.20 integration
  * proxy; only ratios consume the result, so the absolute scale cancels.
  */
-static uq12_20_t _psd_simpson_step(const uq4_28_t *x, int16_t start, int16_t end) {
+static uq12_20_t _psd_simpson_step(const uq9_23_t *x, int16_t start, int16_t end) {
     int n_intervals = (end - start) / 2;
     int16_t idx = start;
     uq12_20_t sum = 0;
 
     for (int i = 0; i < n_intervals; i++) {
-        uq12_20_t x0 = (uq12_20_t)(x[idx] >> 8U);
-        uq12_20_t x1 = (uq12_20_t)(x[idx + 1] >> 8U);
-        uq12_20_t x2 = (uq12_20_t)(x[idx + 2] >> 8U);
+        uq12_20_t x0 = (uq12_20_t)(x[idx] >> 3U);
+        uq12_20_t x1 = (uq12_20_t)(x[idx + 1] >> 3U);
+        uq12_20_t x2 = (uq12_20_t)(x[idx + 2] >> 3U);
         sum += x0 + (x1 << 2) + x2;
         idx += 2;
     }
@@ -352,14 +341,14 @@ static uq12_20_t _psd_simpson_step(const uq4_28_t *x, int16_t start, int16_t end
 }
 
 // Numerical integral of the proxy spectrum.
-static uq12_20_t _psd_simpson(const uq4_28_t *x, int16_t len) {
+static uq12_20_t _psd_simpson(const uq9_23_t *x, int16_t len) {
     if (!x || len <= 1) return 0U;
 
     if ((len & 1) == 0) {
-        uq12_20_t val = (((uq12_20_t)(x[len - 1] >> 8U) + (uq12_20_t)(x[len - 2] >> 8U)) + 1U) >> 1;
+        uq12_20_t val = (((uq12_20_t)(x[len - 1] >> 3U) + (uq12_20_t)(x[len - 2] >> 3U)) + 1U) >> 1;
         uq12_20_t result = _psd_simpson_step(x, 0, len - 1);
 
-        val += ((((uq12_20_t)(x[0] >> 8U) + (uq12_20_t)(x[1] >> 8U)) + 1U) >> 1);
+        val += ((((uq12_20_t)(x[0] >> 3U) + (uq12_20_t)(x[1] >> 3U)) + 1U) >> 1);
         result += _psd_simpson_step(x, 1, len);
 
         val = (val + 1U) >> 1;
@@ -370,69 +359,12 @@ static uq12_20_t _psd_simpson(const uq4_28_t *x, int16_t len) {
     return _psd_simpson_step(x, 0, len);
 }
 
-/* Widened bandpower integration path.
- * Bandpower is a ratio, so the absolute PSD scale cancels. Integrating the
- * widened UQ8.56 proxy keeps weak bins visible while the final Q0.16 output
- * stays unchanged.
- */
-static uint8_t _psd_simpson64_shift(const uq8_56_t *x, int16_t len) {
-    uq8_56_t max_val = 0;
-    for (int16_t i = 0; i < len; i++) {
-        if (x[i] > max_val) max_val = x[i];
-    }
-
-    uint64_t denom = ((uint64_t)len * 4U) + 1U;
-    uint64_t limit = (UINT64_MAX >> 16U) / denom;
-    uint8_t shift = 0;
-    while (max_val > limit && shift < 63U) {
-        max_val >>= 1U;
-        shift++;
-    }
-    return shift;
-}
-
-static uint64_t _psd_simpson64_step(const uq8_56_t *x, int16_t start, int16_t end,
-                                    uint8_t shift) {
-    int n_intervals = (end - start) / 2;
-    int16_t idx = start;
-    uint64_t sum = 0;
-
-    for (int i = 0; i < n_intervals; i++) {
-        uint64_t x0 = x[idx] >> shift;
-        uint64_t x1 = x[idx + 1] >> shift;
-        uint64_t x2 = x[idx + 2] >> shift;
-        sum += x0 + (x1 << 2U) + x2;
-        idx += 2;
-    }
-
-    return (sum + 1U) / 3U;
-}
-
-static uint64_t _psd_simpson64(const uq8_56_t *x, int16_t len, uint8_t shift) {
-    if (!x || len <= 1) return 0U;
-
-    if ((len & 1) == 0) {
-        uint64_t val = (((x[len - 1] >> shift) + (x[len - 2] >> shift)) + 1U) >> 1U;
-        uint64_t result = _psd_simpson64_step(x, 0, len - 1, shift);
-
-        val += (((x[0] >> shift) + (x[1] >> shift)) + 1U) >> 1U;
-        result += _psd_simpson64_step(x, 1, len, shift);
-
-        val = (val + 1U) >> 1U;
-        result = (result + 1U) >> 1U;
-
-        return result + val;
-    }
-
-    return _psd_simpson64_step(x, 0, len, shift);
-}
-
 /* Dominant frequency: frequency corresponding to the maximum proxy value.
- * Proxy is UQ8.56, frequencies are UQ12.20, and the result is UQ12.20.
+ * Proxy is UQ9.23, frequencies are UQ12.20, and the result is UQ12.20.
  */
-static uq12_20_t _dominant_freq(const uq8_56_t *proxy, const uq12_20_t *freqs, int16_t len) {
+static uq12_20_t _dominant_freq(const uq9_23_t *proxy, const uq12_20_t *freqs, int16_t len) {
     int16_t max_idx = 0;
-    uq8_56_t max_val = proxy[0];
+    uq9_23_t max_val = proxy[0];
     for (int16_t i = 1; i < len; i++) {
         if (proxy[i] > max_val) {
             max_val = proxy[i];
@@ -443,47 +375,47 @@ static uq12_20_t _dominant_freq(const uq8_56_t *proxy, const uq12_20_t *freqs, i
 }
 
 /* Spectral flatness: exp(mean(log(power)) - log(mean(power))).
- * Proxy input is UQ4.28, but typical proxy values span many orders of
+ * Proxy input is UQ9.23, but typical proxy values span many orders of
  * magnitude, so small bins quantize to zero. Pre-scale every bin by the same
  * left shift so the largest fits just under 2^31; the shift adds the same
  * s*ln(2) to mean_log and to log_mean_proxy and cancels in the difference.
  * Logs are Q21.11, the difference fits in Q5.11, and the output ratio is UQ0.16.
  */
-static uq0_16_t _flatness(const uq4_28_t *proxy, int16_t len) {
+static uq0_16_t _flatness(const uq9_23_t *proxy, int16_t len) {
     // Find the largest bin so we can pick a per-array left shift that lifts
-    // the rest of the bins out of the UQ4.28 quantization floor. PSD proxy
+    // the rest of the bins out of the UQ9.23 quantization floor. PSD proxy
     // values span many orders of magnitude; without a shift, anything below
-    // 2^-28 collapses to 0 and the log term loses most of its dynamic range.
-    uq4_28_t max_proxy = 0;
+    // 2^-23 collapses to 0 and the log term loses most of its dynamic range.
+    uq9_23_t max_proxy = 0;
     for (int16_t i = 0; i < len; i++) {
         if (proxy[i] > max_proxy) max_proxy = proxy[i];
     }
     if (max_proxy == 0U) return 0;
 
-    // Pick the largest shift that keeps max_proxy strictly inside uint32.
-    // Stopping at 2^30 leaves one bit of headroom for the streaming-mean
-    // updates so v - mean_scaled cannot overflow.
-    uint8_t scale = 0;
-    while ((max_proxy << scale) < (1U << 30) && scale < 31U) scale++;
+    // Pick the largest shift that keeps max_proxy below 2^31. Do this from
+    // the MSB instead of probing with left shifts, because probing can wrap
+    // before the loop has decided the final scale.
+    uint32_t msb = 31U - (uint32_t)__builtin_clz(max_proxy);
+    uint8_t scale = (msb < 30U) ? (uint8_t)(30U - msb) : 0U;
 
     // Both the log accumulator and the streaming arithmetic mean operate on
     // the shifted values. The shift adds the same constant s*ln(2) to
     // mean(log(x)) and to log(mean(x)), so it cancels in the final diff and
     // does not need to be tracked explicitly.
     int32_t sum_logs = 0;
-    uq4_28_t mean_scaled = 0;
+    uq9_23_t mean_scaled = 0;
 
     for (int16_t i = 0; i < len; i++) {
         // Apply the per-array shift. Anything still rounding to 0 after the
         // shift is clamped to 1 LSB so _log_psd never sees a zero input.
-        uq4_28_t v = proxy[i] << scale;
+        uq9_23_t v = proxy[i] << scale;
         if (v == 0U) v = 1U;
         sum_logs += _log_psd(v);
 
         // Streaming arithmetic mean: mean_n = mean_{n-1} + (v - mean) / n.
         // Branching on sign avoids underflowing the unsigned difference;
         // truncated integer division is biased toward zero in either case
-        // but keeps the running mean within UQ4.28 without a 64-bit accum.
+        // but keeps the running mean within the 32-bit proxy without a 64-bit accum.
         uint32_t n = (uint32_t)i + 1U;
         if (v >= mean_scaled) {
             mean_scaled += (v - mean_scaled) / n;
@@ -508,51 +440,11 @@ static uq0_16_t _flatness(const uq4_28_t *proxy, int16_t len) {
     return _exp_psd((q5_11_t)diff);
 }
 
-/* Widened flatness path. Flatness is dominated by the smallest nonzero bins,
- * so the PSD proxy stays in UQ8.56 and the scale-cancelling math preserves the
- * ratio while keeping a much lower log floor than the earlier UQ4.28 proxy.
- */
-static uq0_16_t _flatness64(const uq8_56_t *proxy, int16_t len) {
-    uq8_56_t max_proxy = 0;
-    for (int16_t i = 0; i < len; i++) {
-        if (proxy[i] > max_proxy) max_proxy = proxy[i];
-    }
-    if (max_proxy == 0U) return 0;
-
-    uint32_t msb = 63U - (uint32_t)__builtin_clzll(max_proxy);
-    uint8_t scale = (msb < 62U) ? (uint8_t)(62U - msb) : 0U;
-
-    int32_t sum_logs = 0;
-    uq8_56_t mean_scaled = 0;
-
-    for (int16_t i = 0; i < len; i++) {
-        uq8_56_t v = proxy[i] << scale;
-        if (v == 0U) v = 1U;
-        sum_logs += _log_psd64(v, 56U);
-
-        uint64_t n = (uint64_t)i + 1U;
-        if (v >= mean_scaled) {
-            mean_scaled += (v - mean_scaled) / n;
-        } else {
-            mean_scaled -= (mean_scaled - v) / n;
-        }
-    }
-
-    if (mean_scaled == 0U) return 0;
-
-    q21_11_t mean_log = (q21_11_t)(sum_logs / (int32_t)len);
-    q21_11_t log_mean_scaled = _log_psd64(mean_scaled, 56U);
-    int32_t diff = (int32_t)mean_log - (int32_t)log_mean_scaled;
-    if (diff > 0) diff = 0;
-    if (diff < INT16_MIN) diff = INT16_MIN;
-    return _exp_psd((q5_11_t)diff);
-}
-
 /* Per-band relative power: integral of the proxy over each [start, end] band
  * divided by the total proxy integral. Output ratios are UQ0.16 so each band
  * is expressed as a fraction of total power.
  */
-static void _bandpowers(const uq8_56_t *proxy, const uq12_20_t *freqs, int16_t len,
+static void _bandpowers(const uq9_23_t *proxy, const uq12_20_t *freqs, int16_t len,
                         const int8_t *psd_selector, uq0_16_t *band_powers) {
     if (!band_powers) return;
     for (int8_t i = 0; i < N_PSD; i++)
@@ -560,8 +452,7 @@ static void _bandpowers(const uq8_56_t *proxy, const uq12_20_t *freqs, int16_t l
 
     if (!proxy || !freqs || !psd_selector || len <= 2) return;
 
-    uint8_t integral_shift = _psd_simpson64_shift(proxy, len);
-    uint64_t total_power = _psd_simpson64(proxy, len, integral_shift);
+    uq12_20_t total_power = _psd_simpson(proxy, len);
     if (total_power == 0U) return;
 
     for (int8_t i = 0; i < N_PSD; i++) {
@@ -592,18 +483,17 @@ static void _bandpowers(const uq8_56_t *proxy, const uq12_20_t *freqs, int16_t l
             continue;
         }
 
-        // band_power and total_power share the same proxy scale, so the ratio is unitless.
+        // band_power and total_power are both UQ12.20, so the ratio is unitless.
         // Shift by 16 first to land in UQ0.16, with a half-LSB rounding term.
-        uint64_t band_power = _psd_simpson64(&proxy[start_idx], n_bins, integral_shift);
-        uint64_t ratio = ((band_power << 16) + (total_power >> 1)) / total_power;
+        uq12_20_t band_power = _psd_simpson(&proxy[start_idx], n_bins);
+        uint64_t ratio = (((uint64_t)band_power << 16) + (total_power >> 1)) / total_power;
         band_powers[i] = (ratio > UINT16_MAX) ? UINT16_MAX : (uq0_16_t)ratio;
     }
 }
 
 /* Welch PSD feature block. The accumulated spectrum is kept as a proxy because
  * flatness, bandpower ratios, and dominant frequency do not need absolute PSD
- * normalization. The proxy stays widened so the band ratios see the same weak
- * bins as the flatness calculation.
+ * normalization.
  */
 void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int16_t sig_len,
                         int16_t fs, fxp_feat_t *feats) {
@@ -631,7 +521,7 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
     kiss_fft_scalar *timedata =
         (kiss_fft_scalar *)malloc((size_t)NPERSEG * sizeof(kiss_fft_scalar));
     kiss_fft_cpx *cx_out = (kiss_fft_cpx *)malloc((size_t)psd_len * sizeof(kiss_fft_cpx));
-    uq8_56_t *acc_power = (uq8_56_t *)malloc((size_t)psd_len * sizeof(uq8_56_t));
+    uq9_23_t *acc_power = (uq9_23_t *)malloc((size_t)psd_len * sizeof(uq9_23_t));
     uq12_20_t *freqs = (uq12_20_t *)malloc((size_t)psd_len * sizeof(uq12_20_t));
     kiss_fftr_cfg cfg = kiss_fftr_alloc(NPERSEG, 0, 0, 0);
 
@@ -644,7 +534,7 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
         return;
     }
 
-    memset(acc_power, 0, (size_t)psd_len * sizeof(uq8_56_t));
+    memset(acc_power, 0, (size_t)psd_len * sizeof(uq9_23_t));
 
     // Welch periodogram: window each segment, RFFT it, accumulate |X|^2.
     int16_t start = 0;
@@ -668,29 +558,23 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
 
         kiss_fftr(cfg, timedata, cx_out);
 
-        // Squared magnitude per bin. Baseline:
-        //   q8_8_t re = (q8_8_t)(cx_out[i].r >> 22);
-        //   q8_8_t im = (q8_8_t)(cx_out[i].i >> 22);
-        //   uq16_16_t mag = re*re + im*im;
-        //   uq21_11_t power = (uq21_11_t)(mag >> 5);
-        //
-        // Previous scaled proxy:
-        //   uq9_23_t power = (uq9_23_t)(mag >> 5);
-        //
-        // Fixed KissFFT is scaled by 1/NPERSEG. Use the wide Q2.30 bins here
-        // so PSD flatness and bandpower ratios do not lose weak-bin energy.
+        // Quantize fixed KissFFT bins back to Q2.14 before squaring. Squared
+        // magnitude is UQ4.28, then shifted to the UQ9.23 PSD proxy.
         for (int16_t i = 0; i < psd_len; i++) {
-            // Use cx_out directly as Q2.30, square to UQ4.60, then keep
-            // UQ8.56 for the accumulated PSD proxy. This preserves the small
-            // bins that decide flatness and low-frequency band ratios.
-            int64_t re_q30 = (int64_t)cx_out[i].r;
-            int64_t im_q30 = (int64_t)cx_out[i].i;
-            uq8_56_t power =
-                (uq8_56_t)((((uint64_t)(re_q30 * re_q30)) + (uint64_t)(im_q30 * im_q30)) >> 4U);
+            q2_14_t re = (q2_14_t)(cx_out[i].r >> 16);
+            q2_14_t im = (q2_14_t)(cx_out[i].i >> 16);
+            uq4_28_t mag =
+                (uq4_28_t)((int32_t)re * (int32_t)re) +
+                (uq4_28_t)((int32_t)im * (int32_t)im);
+            uq9_23_t power = (uq9_23_t)((mag + (1U << 4U)) >> 5U);
             if (i != 0 && i != (NPERSEG / 2)) {
-                power <<= 1U;
+                power = (power > (UINT32_MAX >> 1U)) ? UINT32_MAX : (uq9_23_t)(power << 1U);
             }
-            acc_power[i] += power;
+            if (power > (UINT32_MAX - acc_power[i])) {
+                acc_power[i] = UINT32_MAX;
+            } else {
+                acc_power[i] += power;
+            }
         }
 
         start = (int16_t)(start + hop);
@@ -711,13 +595,14 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
     }
 
     if (need_flatness) {
-        uq0_16_t flatness = _flatness64(acc_power, psd_len);
+        uq0_16_t flatness = _flatness(acc_power, psd_len);
         feats[SPECTRAL_FLATNESS] = (fxp_feat_t)flatness;
     }
 
     if (need_bandpowers) {
         uq0_16_t band_powers[N_PSD] = {0};
-        _bandpowers(acc_power, freqs, psd_len, &features_selector[POWER_SPECTRAL_DENSITY], band_powers);
+        _bandpowers(acc_power, freqs, psd_len, &features_selector[POWER_SPECTRAL_DENSITY],
+                    band_powers);
         for (int8_t i = 0; i < N_PSD; i++) {
             if (features_selector[POWER_SPECTRAL_DENSITY + i]) {
                 feats[POWER_SPECTRAL_DENSITY + i] = (fxp_feat_t)band_powers[i];
@@ -858,8 +743,7 @@ void audio_mel_features(const int8_t *features_selector, const int16_t *sig, int
     int32_t *mel_db = (int32_t *)malloc((size_t)n_mels_needed * (size_t)n_frames * sizeof(int32_t));
     kiss_fftr_cfg cfg = kiss_fftr_alloc(N_FFT, 0, 0, 0);
 
-    if (!timedata || !cx_out || !frame_power || !mel_entropy_power ||
-        !mel_db || !cfg) {
+    if (!timedata || !cx_out || !frame_power || !mel_entropy_power || !mel_db || !cfg) {
         free(timedata);
         free(cx_out);
         free(frame_power);
@@ -892,15 +776,6 @@ void audio_mel_features(const int8_t *features_selector, const int16_t *sig, int
 
         kiss_fftr(cfg, timedata, cx_out);
 
-        // Baseline:
-        //   q10_22_t re = (q10_22_t)(cx_out[k].r >> 8);
-        //   q10_22_t im = (q10_22_t)(cx_out[k].i >> 8);
-        //   uq20_44_t p = re*re + im*im;
-        // Previous scaled test:
-        //   q8_24_t re = (q8_24_t)(cx_out[k].r >> 6);
-        //   q8_24_t im = (q8_24_t)(cx_out[k].i >> 6);
-        //   uq16_48_t p = re*re + im*im;
-        //
         // Fixed KissFFT is scaled by 1/N_FFT, so Q4.28 keeps more fractional
         // precision while leaving headroom for the 64-bit mel-weight product.
         for (int16_t k = 0; k < FFT_RES_LEN; k++) {

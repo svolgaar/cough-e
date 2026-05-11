@@ -593,9 +593,9 @@ static inline q7_9_t _log_mel_power(uint64_t x)
 }
 
 /* Natural logarithm for PSD proxy values.
- * Input is UQ4.28 and output is kept in 32-bit Q21.11.
+ * Input is the 32-bit PSD proxy format and output is kept in Q21.11.
  */
-static inline q21_11_t _log_psd(uq4_28_t x)
+static inline q21_11_t _log_psd(uint32_t x)
 {
     if (x == 0U) x = 1U;
 
