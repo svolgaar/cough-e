@@ -593,9 +593,9 @@ static inline q7_9_t _log_mel_power(uint64_t x)
 }
 
 /* Natural logarithm for PSD proxy values.
- * Input is UQ21.11 and output is kept in 32-bit Q21.11.
+ * Input is UQ4.28 and output is kept in 32-bit Q21.11.
  */
-static inline q21_11_t _log_psd(uq21_11_t x)
+static inline q21_11_t _log_psd(uq4_28_t x)
 {
     if (x == 0U) x = 1U;
 
@@ -612,6 +612,36 @@ static inline q21_11_t _log_psd(uq21_11_t x)
     int32_t y = y0 + (int32_t)((((int64_t)(y1 - y0) * (int64_t)alpha) + (1LL << 15)) >> 16);
 
     int32_t exponent = (int32_t)msb - FXP_FRAC_AUDIO_PSD_PROXY;
+    int64_t log = (int64_t)exponent * (int64_t)FXP_LN2_Q24 + (int64_t)y;
+    return (q21_11_t)(log >> 13);
+}
+
+/* Natural logarithm for widened PSD flatness values.
+ * Input is a UQ*.frac fixed-point integer and output is Q21.11.
+ */
+static inline q21_11_t _log_psd64(uint64_t x, uint8_t frac_bits)
+{
+    if (x == 0U) x = 1U;
+
+    uint32_t msb = 63U - (uint32_t)__builtin_clzll(x);
+    uint64_t base = (uint64_t)1U << msb;
+    uint64_t rem = x - base;
+    uint32_t frac;
+    if (msb >= 24U) {
+        frac = (uint32_t)(rem >> (msb - 24U));
+    } else {
+        frac = (uint32_t)(rem << (24U - msb));
+    }
+
+    uint32_t idx = frac >> 16;
+    if (idx >= FXP_LN_LUT_SIZE) idx = FXP_LN_LUT_SIZE - 1;
+    uint32_t alpha = frac & 0xFFFFU;
+
+    int32_t y0 = fxp_ln_lut_q24[idx];
+    int32_t y1 = fxp_ln_lut_q24[idx + 1];
+    int32_t y = y0 + (int32_t)((((int64_t)(y1 - y0) * (int64_t)alpha) + (1LL << 15)) >> 16);
+
+    int32_t exponent = (int32_t)msb - (int32_t)frac_bits;
     int64_t log = (int64_t)exponent * (int64_t)FXP_LN2_Q24 + (int64_t)y;
     return (q21_11_t)(log >> 13);
 }

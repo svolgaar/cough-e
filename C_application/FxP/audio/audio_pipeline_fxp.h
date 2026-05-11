@@ -19,8 +19,8 @@ typedef struct {
     int16_t n_frames;
     int16_t n_mels;
     uint8_t idxs_needed[N_MFCC];
-    uq20_44_t *frame_power;
-    uq20_44_t *mel_power;
+    uq8_56_t *frame_power;
+    uq8_56_t *mel_power;
     int32_t *mel_db_q9; // Q?.9 widened to int32 to keep pre-clip headroom.
     q7_9_t mean_q9[N_MFCC];
     q7_9_t std_q9[N_MFCC];
@@ -33,9 +33,9 @@ typedef struct {
 int audio_fft_stage_probe(const int16_t *sig,
                           int16_t len,
                           int16_t fs,
-                          uq12_20_t *mags,
+                          uq4_28_t *mags,
                           uq12_20_t *freqs,
-                          uq15_17_t *sum_mags);
+                          uq7_25_t *sum_mags);
 
 #endif
 
