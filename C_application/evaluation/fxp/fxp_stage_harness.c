@@ -396,13 +396,13 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
     int16_t fft_len = (int16_t)((len / 2) + 1);
     float *mags = (float *)malloc((size_t)fft_len * sizeof(float));
     float *freqs = (float *)malloc((size_t)fft_len * sizeof(float));
-    uq12_20_t *fxp_mags_q20 = (uq12_20_t *)malloc((size_t)fft_len * sizeof(uq12_20_t));
+    uq4_28_t *fxp_mags_q28 = (uq4_28_t *)malloc((size_t)fft_len * sizeof(uq4_28_t));
     uq12_20_t *fxp_freqs_q20 = (uq12_20_t *)malloc((size_t)fft_len * sizeof(uq12_20_t));
     fxp_feat_t fxp_feats[Number_AUDIO_Features];
-    if (!mags || !freqs || !fxp_mags_q20 || !fxp_freqs_q20) {
+    if (!mags || !freqs || !fxp_mags_q28 || !fxp_freqs_q20) {
         free(mags);
         free(freqs);
-        free(fxp_mags_q20);
+        free(fxp_mags_q28);
         free(fxp_freqs_q20);
         return;
     }
@@ -411,11 +411,11 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
 
     float sum_mags = 0.0f;
     compute_rfft(sig, len, fs, mags, freqs, &sum_mags);
-    uq15_17_t fxp_sum_q17 = 0;
+    uq7_25_t fxp_sum_q25 = 0;
     int have_fxp_fft = audio_fft_stage_probe(sig_q14, len, fs,
-                                             fxp_mags_q20,
+                                             fxp_mags_q28,
                                              fxp_freqs_q20,
-                                             &fxp_sum_q17);
+                                             &fxp_sum_q25);
 
     int8_t probe_selector[Number_AUDIO_Features] = {0};
     if (need_rolloff) probe_selector[SPECTRAL_ROLLOFF] = 1;
@@ -425,12 +425,12 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
     audio_fft_features(probe_selector, sig_q14, len, fs, fxp_feats);
 
     if (have_fxp_fft) {
-        float fxp_sum = FXP_TO_FLOAT(fxp_sum_q17, 17);
+        float fxp_sum = FXP_TO_FLOAT(fxp_sum_q25, 25);
         float mag_scale = (fxp_sum > 0.0f) ? (sum_mags / fxp_sum) : 0.0f;
         for (int16_t i = 0; i < fft_len; i++) {
             add_metric(table, count, "compute_rfft",
                        mags[i],
-                       FXP_TO_FLOAT(fxp_mags_q20[i], 20) * mag_scale);
+                       FXP_TO_FLOAT(fxp_mags_q28[i], 28) * mag_scale);
         }
     }
 
@@ -460,7 +460,7 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
 
     free(mags);
     free(freqs);
-    free(fxp_mags_q20);
+    free(fxp_mags_q28);
     free(fxp_freqs_q20);
 }
 
