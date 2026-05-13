@@ -21,15 +21,15 @@ typedef struct {
     uint8_t idxs_needed[N_MFCC];
     uq8_56_t *frame_power;
     uq8_56_t *mel_power;
-    q23_9_t *mel_db_q9;
+    q23_9_t *mel_db;
     uint8_t frame_power_frac_bits;
     uint8_t mel_power_frac_bits;
-    q7_9_t mean_q9[N_MFCC];
-    q7_9_t std_q9[N_MFCC];
-    q7_9_t max_q9[N_MFCC];
-    uint16_t entropy_q14[N_MFCC];
-    q23_9_t stft_db_offset_q9;
-    q23_9_t mel_db_offset_q9;
+    q7_9_t mean[N_MFCC];
+    q7_9_t std[N_MFCC];
+    q7_9_t max[N_MFCC];
+    uq2_14_t entropy[N_MFCC];
+    q23_9_t stft_db_offset;
+    q23_9_t mel_db_offset;
 } audio_mel_stage_probe_t;
 
 int audio_fft_stage_probe(const int16_t *sig,

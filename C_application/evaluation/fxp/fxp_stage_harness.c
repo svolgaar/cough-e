@@ -600,7 +600,7 @@ static void add_audio_mel_kernel_metrics(named_metric_t *table,
                                                             probe.mel_power_frac_bits,
                                                             N_FFT);
         add_metric(table, count, "mel_spectrogram", ref_mel_power[i], fxp_mel_power);
-        add_metric(table, count, "power_to_dB", ref_mel_db[i], FXP_TO_FLOAT(probe.mel_db_q9[i], 9));
+        add_metric(table, count, "power_to_dB", ref_mel_db[i], FXP_TO_FLOAT(probe.mel_db[i], 9));
     }
 
     for (int16_t m = 0; m < probe.n_mels; m++) {
@@ -612,22 +612,22 @@ static void add_audio_mel_kernel_metrics(named_metric_t *table,
         if (selector[MEL_FREQUENCY_CEPSTRAL_COEFFICIENT + mel_bin]) {
             add_metric(table, count, "feature_aggregation",
                        ref_mean[m],
-                       FXP_TO_FLOAT(probe.mean_q9[mel_bin], 9));
+                       FXP_TO_FLOAT(probe.mean[mel_bin], 9));
         }
         if (selector[MEL_FREQUENCY_CEPSTRAL_COEFFICIENT + N_MFCC + mel_bin]) {
             add_metric(table, count, "feature_aggregation",
                        ref_std[m],
-                       FXP_TO_FLOAT(probe.std_q9[mel_bin], 9));
+                       FXP_TO_FLOAT(probe.std[mel_bin], 9));
         }
         if (selector[MEL_FREQUENCY_CEPSTRAL_COEFFICIENT + (2 * N_MFCC) + mel_bin]) {
             add_metric(table, count, "feature_aggregation",
                        ref_max[m],
-                       FXP_TO_FLOAT(probe.max_q9[mel_bin], 9));
+                       FXP_TO_FLOAT(probe.max[mel_bin], 9));
         }
         if (selector[MEL_FREQUENCY_CEPSTRAL_COEFFICIENT + (3 * N_MFCC) + mel_bin]) {
             add_metric(table, count, "entropy",
                        ref_entropy[m],
-                       FXP_TO_FLOAT(probe.entropy_q14[mel_bin], 14));
+                       FXP_TO_FLOAT(probe.entropy[mel_bin], 14));
         }
     }
 

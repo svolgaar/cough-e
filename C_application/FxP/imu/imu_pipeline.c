@@ -10,7 +10,8 @@
 /*  FxP kernels : IMU                                                             */
 /* -------------------------------------------------------------------------- */
 
-#define FXP_KURT_FISHER_Q10_22 ((int32_t)3 << FXP_FRAC_IMU_KURTOSIS_RAW)
+// Fisher offset for kurtosis, stored in Q10.22.
+#define FXP_KURT_FISHER ((int32_t)3 << FXP_FRAC_IMU_KURTOSIS_RAW)
 
 // Crest factor for the gyro L2 norm signal: peak / RMS.
 // peak is UQ5.11, RMS is UQ7.9, and the result is UQ2.14.
@@ -72,7 +73,8 @@ static uq7_9_t _line_length_raw(const q11_5_t *sig, int16_t len) {
     uq7_9_t sum = 0;
     for (int16_t i = 0; i < len - 1; i++) {
         uq11_5_t diff = (uq11_5_t)_abs_delta_raw(sig[i + 1], sig[i]);
-        sum += (uq7_9_t)(diff << 4U);
+        uq7_9_t step = (uq7_9_t)(diff << 4U);
+        sum = (step > (uint16_t)(UINT16_MAX - sum)) ? UINT16_MAX : (uq7_9_t)(sum + step);
     }
 
     return (sum / (uint16_t)(len - 1));
@@ -87,7 +89,8 @@ static uq7_9_t _line_length_l2g(const uq5_11_t *sig, int16_t len) {
         // Two-step shift via UQ6.10 keeps an LSB of headroom for the running
         // sum: a single >> 2 would round each diff down twice as harshly.
         uq6_10_t diff = (uq6_10_t)_abs_delta_l2g(sig[i + 1], sig[i]) >> 1U;
-        sum += (uq7_9_t)(diff >> 1U);
+        uq7_9_t step = (uq7_9_t)(diff >> 1U);
+        sum = (step > (uint16_t)(UINT16_MAX - sum)) ? UINT16_MAX : (uq7_9_t)(sum + step);
     }
 
     return (sum / (uint16_t)(len - 1));
@@ -143,7 +146,7 @@ static q10_22_t _kurtosis(const q11_5_t *sig, int16_t len) {
     if (denom_shifted == 0) return 0;
     uint64_t normalized = (sum_dev_4 << 16U) / denom_shifted;
 
-    return (q10_22_t)((int32_t)normalized - FXP_KURT_FISHER_Q10_22);
+    return (q10_22_t)((int32_t)normalized - FXP_KURT_FISHER);
 }
 
 static uq5_11_t _max_l2g(const uq5_11_t *sig, int16_t len)
@@ -185,7 +188,7 @@ typedef struct {
     int16_t last;
 } azc_segment_t;
 
-/* Approximate Zero Crossing (AZC). Th
+/* Approximate zero crossing (AZC).
  * The returned feature is an integer count, so its fractional width is 0.
  */
 static inline int32_t _azc_sample(const void *sig, int16_t idx, uint8_t is_signed)
@@ -256,7 +259,7 @@ static int16_t *_azc_polygonal_approx(const void *sig, int16_t len, uint8_t is_s
         uint32_t max_dist = _azc_max_vdist(sig, first, last, is_signed, &mid);
 
         if (max_dist > eps_fxp) {
-                        stack[next + 1].first = first;
+            stack[next + 1].first = first;
             stack[next + 1].last = mid;
             stack[next + 2].first = mid;
             stack[next + 2].last = last;
@@ -313,11 +316,11 @@ static int16_t _azc(const void *sig, int16_t len, uint8_t is_signed, uint32_t ep
 }
 
 static int16_t _azc_from_signal(const void *sig, int16_t len,
-                                uint8_t is_signed, uint32_t epsilon_q)
+                                uint8_t is_signed, uint32_t epsilon)
 {
     if (len <= 0) return 0;
 
-    return _azc(sig, len, is_signed, epsilon_q);
+    return _azc(sig, len, is_signed, epsilon);
 }
 
 /*
@@ -325,9 +328,9 @@ static int16_t _azc_from_signal(const void *sig, int16_t len,
  *   eps = [0.3, 0.4, ..., 1.0]
  * encoded per signal carrier Q-format.
  */
-static const uint32_t k_azc_eps_raw_q5[8] = {10U, 13U, 16U, 19U, 22U, 26U, 29U, 32U};
-static const uint32_t k_azc_eps_l2a_q6[8] = {19U, 26U, 32U, 38U, 45U, 51U, 58U, 64U};
-static const uint32_t k_azc_eps_l2g_q11[8] = {614U, 819U, 1024U, 1229U, 1434U, 1638U, 1843U, 2048U};
+static const uint32_t k_azc_eps_raw[8] = {10U, 13U, 16U, 19U, 22U, 26U, 29U, 32U};
+static const uint32_t k_azc_eps_l2a[8] = {19U, 26U, 32U, 38U, 45U, 51U, 58U, 64U};
+static const uint32_t k_azc_eps_l2g[8] = {614U, 819U, 1024U, 1229U, 1434U, 1638U, 1843U, 2048U};
 
 /* Per-signal feature dispatch. */
 static void _run_raw_feature(const q11_5_t *sig, int16_t len, uint8_t local, fxp_feat_t *out)
@@ -345,7 +348,7 @@ static void _run_raw_feature(const q11_5_t *sig, int16_t len, uint8_t local, fxp
     default:
         if (local >= APPROXIMATE_ZERO_CROSSING && local < Num_imu_feat_families) {
             uint8_t idx = (uint8_t)(local - APPROXIMATE_ZERO_CROSSING);
-            int16_t azc = _azc_from_signal(sig, len, 1U, k_azc_eps_raw_q5[idx]);
+            int16_t azc = _azc_from_signal(sig, len, 1U, k_azc_eps_raw[idx]);
             *out = (fxp_feat_t)azc;
             return;
         }
@@ -363,7 +366,7 @@ static void _run_l2a_feature(const uq10_6_t *sig, int16_t len, uint8_t local, fx
 
     if (local >= APPROXIMATE_ZERO_CROSSING && local < Num_imu_feat_families) {
         uint8_t idx = (uint8_t)(local - APPROXIMATE_ZERO_CROSSING);
-        int16_t azc = _azc_from_signal(sig, len, 0U, k_azc_eps_l2a_q6[idx]);
+        int16_t azc = _azc_from_signal(sig, len, 0U, k_azc_eps_l2a[idx]);
         *out = (fxp_feat_t)azc;
         return;
     }
@@ -391,7 +394,7 @@ static void _run_l2g_feature(const uq5_11_t *sig, int16_t len, uint8_t local, fx
     default:
         if (local >= APPROXIMATE_ZERO_CROSSING && local < Num_imu_feat_families) {
             uint8_t idx = (uint8_t)(local - APPROXIMATE_ZERO_CROSSING);
-            int16_t azc = _azc_from_signal(sig, len, 0U, k_azc_eps_l2g_q11[idx]);
+            int16_t azc = _azc_from_signal(sig, len, 0U, k_azc_eps_l2g[idx]);
             *out = (fxp_feat_t)azc;
             return;
         }
