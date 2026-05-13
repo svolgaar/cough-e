@@ -48,8 +48,8 @@ Supported blocks: `audio_fft`, `audio_psd`, `audio_mel`, `audio_scalar`,
 ## Fixed-Point Error Metrics
 
 `evaluate.py --mode fxp-error` reports fixed-point kernel error metrics against
-the float baseline. `evaluate.py --mode float` and `evaluate.py --mode fxp`
-remain the end-to-end ML metric runners.
+the float baseline as absolute deviations. `evaluate.py --mode float` and
+`evaluate.py --mode fxp` remain the end-to-end ML metric runners.
 
 Run from the repository root:
 
@@ -60,7 +60,7 @@ python C_application/evaluation/evaluate.py --mode fxp-error
 The harness emits one accumulator row per measured kernel/function:
 
 ```
-FXP_KERNEL_ACC,block=audio,kernel=...,n=...,sum_sq_err=...,sum_sq_ref=...,max_abs_err=...,max_abs_ref=...
+FXP_KERNEL_ACC,block=audio,kernel=...,n=...,sum_sq_err=...,max_abs_err=...
 ```
 
 ## Output files

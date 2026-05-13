@@ -49,6 +49,7 @@ typedef uint16_t uq11_5_t;
 typedef uint16_t uq0_16_t;
 typedef uint16_t uq6_10_t;
 typedef int16_t q2_14_t;
+typedef int16_t q4_12_t;
 
 /* 32-bit aliases */
 typedef int32_t q12_20_t;
@@ -60,6 +61,8 @@ typedef int32_t q18_14_t;
 typedef int32_t q2_30_t;
 typedef int32_t q8_24_t;
 typedef int32_t q4_28_t;
+typedef int32_t q23_9_t;
+typedef int64_t q3_29_t;
 typedef uint32_t uq10_22_t;
 typedef uint32_t uq13_19_t;
 typedef uint32_t uq16_16_t;
@@ -78,11 +81,14 @@ typedef uint32_t uq24_8_t;
 typedef uint32_t uq18_14_t;
 typedef uint32_t uq4_28_t;
 typedef uint32_t uq2_30_t;
+typedef uint32_t uq8_24_t;
 typedef uint32_t uq9_23_t;
 typedef uint32_t uq7_25_t;
 
 /* 64-bit aliases */
 typedef uint64_t uq4_60_t;
+typedef uint64_t uq9_55_t;
+typedef uint64_t uq12_52_t;
 typedef uint64_t uq14_50_t;
 typedef uint64_t uq20_44_t;
 typedef uint64_t uq16_48_t;

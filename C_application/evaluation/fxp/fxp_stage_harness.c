@@ -368,6 +368,22 @@ static void add_metric(named_metric_t *table,
 static float audio_feat_to_float(fxp_feat_t value, uint16_t feature_idx);
 static float imu_feat_to_float(fxp_feat_t value, uint16_t feature_idx);
 
+static float fxp_scaled_fft_power_to_float(uint64_t power, uint8_t frac_bits, int16_t fft_len)
+{
+    double p = ldexp((double)power, -(int)frac_bits);
+    return (float)(p * (double)fft_len * (double)fft_len);
+}
+
+static double welch_psd_scale(int16_t fs, int16_t steps)
+{
+    double win_sum = 0.0;
+    for (int16_t i = 0; i < NPERSEG; i++) {
+        win_sum += (double)hann_window[i] * (double)hann_window[i];
+    }
+    if (fs <= 0 || steps <= 0 || win_sum <= 0.0) return 0.0;
+    return ((double)NPERSEG * (double)NPERSEG) / ((double)fs * win_sum * (double)steps);
+}
+
 /* Audio FFT kernel diff. Uses audio_fft_stage_probe (a debug entry point in
  * audio_pipeline_fxp.c, only compiled when FXP_STAGE_PROBES is set) to
  * expose the FxP magnitudes and frequency bins in addition to the final
@@ -425,12 +441,11 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
     audio_fft_features(probe_selector, sig_q14, len, fs, fxp_feats);
 
     if (have_fxp_fft) {
-        float fxp_sum = FXP_TO_FLOAT(fxp_sum_q25, 25);
-        float mag_scale = (fxp_sum > 0.0f) ? (sum_mags / fxp_sum) : 0.0f;
+        (void)fxp_sum_q25;
         for (int16_t i = 0; i < fft_len; i++) {
             add_metric(table, count, "compute_rfft",
                        mags[i],
-                       FXP_TO_FLOAT(fxp_mags_q28[i], 28) * mag_scale);
+                       FXP_TO_FLOAT(fxp_mags_q28[i], 28) * (float)len);
         }
     }
 
@@ -464,10 +479,48 @@ static void add_audio_fft_kernel_metrics(named_metric_t *table,
     free(fxp_freqs_q20);
 }
 
-static float mel_power_db_from_probe(uint64_t power, int32_t offset_q9)
+static void add_audio_psd_kernel_metrics(named_metric_t *table,
+                                         int *count,
+                                         const int8_t *selector,
+                                         const float *sig,
+                                         const int16_t *sig_q14,
+                                         int16_t len,
+                                         int16_t fs)
 {
-    double p = (power == 0ULL) ? 1.0 : (double)power;
-    return (float)((10.0 * log10(p)) + FXP_TO_FLOAT(offset_q9, 9));
+    int need_psd = selector[SPECTRAL_FLATNESS] || selector[DOMINANT_FREQUENCY];
+    for (int i = 0; i < N_PSD; i++) {
+        if (selector[POWER_SPECTRAL_DENSITY + i]) need_psd = 1;
+    }
+    if (!need_psd) return;
+
+    int16_t psd_len = (int16_t)((NPERSEG / 2) + 1);
+    float *ref_psd = (float *)malloc((size_t)psd_len * sizeof(float));
+    float *ref_freqs = (float *)malloc((size_t)psd_len * sizeof(float));
+    uq9_23_t *fxp_acc_power = (uq9_23_t *)malloc((size_t)psd_len * sizeof(uq9_23_t));
+    uq12_20_t *fxp_freqs = (uq12_20_t *)malloc((size_t)psd_len * sizeof(uq12_20_t));
+    if (!ref_psd || !ref_freqs || !fxp_acc_power || !fxp_freqs) {
+        free(ref_psd);
+        free(ref_freqs);
+        free(fxp_acc_power);
+        free(fxp_freqs);
+        return;
+    }
+
+    compute_periodogram(sig, len, fs, ref_psd, ref_freqs);
+
+    int16_t steps = 0;
+    if (audio_psd_stage_probe(sig_q14, len, fs, fxp_acc_power, fxp_freqs, &steps)) {
+        double scale = welch_psd_scale(fs, steps);
+        for (int16_t i = 0; i < psd_len; i++) {
+            float fxp_psd = (float)((double)FXP_TO_FLOAT(fxp_acc_power[i], 23) * scale);
+            add_metric(table, count, "compute_periodogram", ref_psd[i], fxp_psd);
+        }
+    }
+
+    free(ref_psd);
+    free(ref_freqs);
+    free(fxp_acc_power);
+    free(fxp_freqs);
 }
 
 static int audio_mel_feature_selected(const int8_t *selector)
@@ -480,11 +533,9 @@ static int audio_mel_feature_selected(const int8_t *selector)
     return 0;
 }
 
-/* Audio mel kernel diff. The probe (audio_mel_stage_probe) hands back the
- * intermediate STFT power, mel-weighted power, and pre-clip dB rows from the
- * FxP path, which we compare against the float reference (stft,
- * mel_spectrogram, power_to_dB, entropy, and the per-row mean/std/max/entropy
- * aggregations). Each comparison goes into its own kernel slot. */
+/* Audio mel kernel diff. Linear STFT and mel powers are scaled back to the
+ * float domain before comparison. The dB-domain comparison is reserved for
+ * power_to_dB and the final dB feature aggregation. */
 static void add_audio_mel_kernel_metrics(named_metric_t *table,
                                          int *count,
                                          const int8_t *selector,
@@ -538,15 +589,17 @@ static void add_audio_mel_kernel_metrics(named_metric_t *table,
     }
 
     for (size_t i = 0; i < frame_count; i++) {
-        float ref = (ref_frame_power[i] > 0.0f) ? (10.0f * log10f(ref_frame_power[i])) : (10.0f * log10f(F_MIN));
-        float fxp = mel_power_db_from_probe(probe.frame_power[i], probe.stft_db_offset_q9);
-        add_metric(table, count, "stft", ref, fxp);
+        float fxp = fxp_scaled_fft_power_to_float(probe.frame_power[i],
+                                                  probe.frame_power_frac_bits,
+                                                  N_FFT);
+        add_metric(table, count, "stft", ref_frame_power[i], fxp);
     }
 
     for (size_t i = 0; i < mel_count; i++) {
-        float ref = (ref_mel_power[i] > 0.0f) ? (10.0f * log10f(ref_mel_power[i])) : (10.0f * log10f(F_MIN));
-        float fxp_preclip = mel_power_db_from_probe(probe.mel_power[i], probe.mel_db_offset_q9);
-        add_metric(table, count, "mel_spectrogram", ref, fxp_preclip);
+        float fxp_mel_power = fxp_scaled_fft_power_to_float(probe.mel_power[i],
+                                                            probe.mel_power_frac_bits,
+                                                            N_FFT);
+        add_metric(table, count, "mel_spectrogram", ref_mel_power[i], fxp_mel_power);
         add_metric(table, count, "power_to_dB", ref_mel_db[i], FXP_TO_FLOAT(probe.mel_db_q9[i], 9));
     }
 
@@ -660,11 +713,9 @@ static void add_audio_kernel_errors(named_metric_t *table,
         case SPECTRAL_KURTOSIS:
             return;
         case SPECTRAL_FLATNESS:
-            add_metric(table, count, "compute_periodogram", ref, fxp);
             add_metric(table, count, "compute_flatness", ref, fxp);
             return;
         case DOMINANT_FREQUENCY:
-            add_metric(table, count, "compute_periodogram", ref, fxp);
             add_metric(table, count, "get_dominant_freq", ref, fxp);
             return;
         case ROOT_MEANS_SQUARED:
@@ -676,7 +727,6 @@ static void add_audio_kernel_errors(named_metric_t *table,
 
     if (feature_idx >= POWER_SPECTRAL_DENSITY &&
         feature_idx < POWER_SPECTRAL_DENSITY + N_PSD) {
-        add_metric(table, count, "compute_periodogram", ref, fxp);
         add_metric(table, count, "normalized_bandpowers", ref, fxp);
         return;
     }
@@ -780,6 +830,12 @@ int main(void)
         compute_audio_float_features(audio_features_selector, sig, WINDOW_SAMP_AUDIO, AUDIO_FS, audio_ref_feats);
         fxp_audio_features(audio_features_selector, audio_q14, WINDOW_SAMP_AUDIO, AUDIO_FS, audio_fxp_feats);
         add_audio_fft_kernel_metrics(audio_table, &audio_n,
+                                     audio_features_selector,
+                                     sig,
+                                     audio_q14,
+                                     WINDOW_SAMP_AUDIO,
+                                     AUDIO_FS);
+        add_audio_psd_kernel_metrics(audio_table, &audio_n,
                                      audio_features_selector,
                                      sig,
                                      audio_q14,

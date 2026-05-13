@@ -21,13 +21,15 @@ typedef struct {
     uint8_t idxs_needed[N_MFCC];
     uq8_56_t *frame_power;
     uq8_56_t *mel_power;
-    int32_t *mel_db_q9; // Q?.9 widened to int32 to keep pre-clip headroom.
+    q23_9_t *mel_db_q9;
+    uint8_t frame_power_frac_bits;
+    uint8_t mel_power_frac_bits;
     q7_9_t mean_q9[N_MFCC];
     q7_9_t std_q9[N_MFCC];
     q7_9_t max_q9[N_MFCC];
     uint16_t entropy_q14[N_MFCC];
-    int32_t stft_db_offset_q9;
-    int32_t mel_db_offset_q9;
+    q23_9_t stft_db_offset_q9;
+    q23_9_t mel_db_offset_q9;
 } audio_mel_stage_probe_t;
 
 int audio_fft_stage_probe(const int16_t *sig,
@@ -36,6 +38,13 @@ int audio_fft_stage_probe(const int16_t *sig,
                           uq4_28_t *mags,
                           uq12_20_t *freqs,
                           uq7_25_t *sum_mags);
+
+int audio_psd_stage_probe(const int16_t *sig,
+                          int16_t sig_len,
+                          int16_t fs,
+                          uq9_23_t *acc_power,
+                          uq12_20_t *freqs,
+                          int16_t *steps_out);
 
 #endif
 

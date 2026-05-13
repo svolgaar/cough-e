@@ -603,9 +603,7 @@ def _parse_fxp_kernel_acc(output):
         rows[(block, kernel)] = {
             "n": int(kv.get("n", "0")),
             "sum_sq_err": float(kv.get("sum_sq_err", "0")),
-            "sum_sq_ref": float(kv.get("sum_sq_ref", "0")),
             "max_abs_err": float(kv.get("max_abs_err", "0")),
-            "max_abs_ref": float(kv.get("max_abs_ref", "0")),
             "nonfinite": int(kv.get("nonfinite", "0")),
         }
     return rows
@@ -615,39 +613,24 @@ def _merge_acc(into, frm):
     """Sum partial accumulators (per recording) into a running total."""
     for key, src in frm.items():
         dst = into.setdefault(key, {
-            "n": 0, "sum_sq_err": 0.0, "sum_sq_ref": 0.0,
-            "max_abs_err": 0.0, "max_abs_ref": 0.0, "nonfinite": 0,
+            "n": 0, "sum_sq_err": 0.0,
+            "max_abs_err": 0.0, "nonfinite": 0,
         })
         dst["n"] += src["n"]
         dst["sum_sq_err"] += src["sum_sq_err"]
-        dst["sum_sq_ref"] += src["sum_sq_ref"]
         dst["nonfinite"] += src.get("nonfinite", 0)
         if src["max_abs_err"] > dst["max_abs_err"]:
             dst["max_abs_err"] = src["max_abs_err"]
-        if src["max_abs_ref"] > dst["max_abs_ref"]:
-            dst["max_abs_ref"] = src["max_abs_ref"]
 
 
 def _acc_to_metrics(acc):
-    """Convert raw accumulator state to percent error metrics.
-
-    RelL2% is normalized by reference energy. RMSE% and MaxAbs% share the
-    max-reference denominator, so RMSE% is guaranteed to be <= MaxAbs%.
-    """
+    """Convert raw accumulator state to absolute deviation metrics."""
     import math
 
-    if acc["n"] <= 0 or acc["sum_sq_ref"] <= 0:
-        rel_l2_pct = 0.0
-    else:
-        rel_l2_pct = 100.0 * math.sqrt(acc["sum_sq_err"] / acc["sum_sq_ref"])
-
-    if acc["max_abs_ref"] > 0:
-        rmse_pct = 100.0 * math.sqrt(acc["sum_sq_err"] / acc["n"]) / acc["max_abs_ref"]
-        max_abs_pct = 100.0 * acc["max_abs_err"] / acc["max_abs_ref"]
-    else:
-        rmse_pct = 0.0
-        max_abs_pct = 0.0
-    return rel_l2_pct, rmse_pct, max_abs_pct
+    if acc["n"] <= 0:
+        return 0.0, 0.0
+    rmse = math.sqrt(acc["sum_sq_err"] / acc["n"])
+    return rmse, acc["max_abs_err"]
 
 
 def _print_fxp_table(table, header):
@@ -656,11 +639,11 @@ def _print_fxp_table(table, header):
     for block in ("audio", "imu"):
         kernels = sorted(k for (b, k) in table if b == block)
         for kernel in kernels:
-            rel_l2_pct, rmse_pct, max_abs_pct = _acc_to_metrics(table[(block, kernel)])
+            rmse, max_abs = _acc_to_metrics(table[(block, kernel)])
             nonfinite = table[(block, kernel)].get("nonfinite", 0)
             suffix = f"  NonFinite={nonfinite}" if nonfinite else ""
-            print(f"  {block:<5}  {kernel:<22}  RelL2%={rel_l2_pct:7.3f}  "
-                  f"RMSE%={rmse_pct:7.3f}  MaxAbs%={max_abs_pct:7.3f}{suffix}")
+            print(f"  {block:<5}  {kernel:<22}  RMSE={rmse:.6g}  "
+                  f"MaxAbs={max_abs:.6g}{suffix}")
 
 
 def _evaluate_fxp_errors(dataset_path, twiddle):
