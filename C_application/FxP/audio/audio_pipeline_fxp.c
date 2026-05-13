@@ -412,23 +412,10 @@ static q2_30_t _psd_window_sample(q2_14_t sample, q2_14_t mean, uq1_15_t window)
     return (q2_30_t)windowed;
 }
 
-static uq9_23_t _psd_power_proxy(q2_14_t re, q2_14_t im, uint8_t double_sided) {
-    uq4_28_t re_sq = (uq4_28_t)((int32_t)re * (int32_t)re);
-    uq4_28_t im_sq = (uq4_28_t)((int32_t)im * (int32_t)im);
-    uq4_28_t magnitude = (re_sq > (UINT32_MAX - im_sq)) ? UINT32_MAX : (uq4_28_t)(re_sq + im_sq);
-    uq9_23_t power = (uq9_23_t)((magnitude + (1U << 4U)) >> 5U);
-
-    if (double_sided) {
-        power = (power > (UINT32_MAX >> 1U)) ? UINT32_MAX : (uq9_23_t)(power << 1U);
-    }
-    return power;
-}
-
-static uq9_55_t _psd_power_proxy_wide(q2_30_t re, q2_30_t im, uint8_t double_sided) {
+static uq9_55_t _psd_power_proxy(q2_30_t re, q2_30_t im, uint8_t double_sided) {
     uq4_60_t re_sq = (uq4_60_t)((int64_t)re * (int64_t)re);
     uq4_60_t im_sq = (uq4_60_t)((int64_t)im * (int64_t)im);
-    uq4_60_t magnitude =
-        (re_sq > (UINT64_MAX - im_sq)) ? UINT64_MAX : (uq4_60_t)(re_sq + im_sq);
+    uq4_60_t magnitude = (re_sq > (UINT64_MAX - im_sq)) ? UINT64_MAX : (uq4_60_t)(re_sq + im_sq);
     uq9_55_t power = (uq9_55_t)((magnitude + (1ULL << 4U)) >> 5U);
 
     if (double_sided) {
@@ -590,20 +577,22 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
         q2_14_t mean_sig = (q2_14_t)(sum_sig / (int32_t)NPERSEG);
 
         for (int16_t i = 0; i < NPERSEG; i++) {
-            timedata[i] = (kiss_fft_scalar)_psd_window_sample(
-                sig[start + i], mean_sig, fxp_hann_window_q15[i]);
+            timedata[i] = (kiss_fft_scalar)_psd_window_sample(sig[start + i], mean_sig,
+                                                              fxp_hann_window_q15[i]);
         }
 
         kiss_fftr(cfg, timedata, cx_out);
 
-        // Quantize fixed KissFFT bins back to Q2.14 before squaring. Squared
-        // magnitude is UQ4.28, then shifted to the UQ9.23 PSD proxy.
+        // Square fixed KissFFT bins in Q2.30 once. The widened UQ9.55 proxy
+        // feeds flatness/bandpowers; the compact UQ9.23 proxy is derived from
+        // it for dominant frequency.
         for (int16_t i = 0; i < psd_len; i++) {
             uint8_t double_sided = (i != 0 && i != (NPERSEG / 2));
 
-            q2_14_t re = (q2_14_t)(cx_out[i].r >> 16);
-            q2_14_t im = (q2_14_t)(cx_out[i].i >> 16);
-            uq9_23_t power = _psd_power_proxy(re, im, double_sided);
+            q2_30_t re = (q2_30_t)cx_out[i].r;
+            q2_30_t im = (q2_30_t)cx_out[i].i;
+            uq9_55_t wide_power = _psd_power_proxy(re, im, double_sided);
+            uq9_23_t power = (uq9_23_t)(wide_power >> 32);
             if (power > (UINT32_MAX - acc_power[i])) {
                 acc_power[i] = UINT32_MAX;
             } else {
@@ -611,9 +600,6 @@ void audio_psd_features(const int8_t *features_selector, const int16_t *sig, int
             }
 
             if (acc_power_wide) {
-                q2_30_t wide_re = (q2_30_t)cx_out[i].r;
-                q2_30_t wide_im = (q2_30_t)cx_out[i].i;
-                uq9_55_t wide_power = _psd_power_proxy_wide(wide_re, wide_im, double_sided);
                 if (wide_power > (UINT64_MAX - acc_power_wide[i])) {
                     acc_power_wide[i] = UINT64_MAX;
                 } else {
@@ -700,16 +686,17 @@ int audio_psd_stage_probe(const int16_t *sig, int16_t sig_len, int16_t fs, uq9_2
         q2_14_t mean_sig = (q2_14_t)(sum_sig / (int32_t)NPERSEG);
 
         for (int16_t i = 0; i < NPERSEG; i++) {
-            timedata[i] = (kiss_fft_scalar)_psd_window_sample(
-                sig[start + i], mean_sig, fxp_hann_window_q15[i]);
+            timedata[i] = (kiss_fft_scalar)_psd_window_sample(sig[start + i], mean_sig,
+                                                              fxp_hann_window_q15[i]);
         }
 
         kiss_fftr(cfg, timedata, cx_out);
 
         for (int16_t i = 0; i < psd_len; i++) {
-            q2_14_t re = (q2_14_t)(cx_out[i].r >> 16);
-            q2_14_t im = (q2_14_t)(cx_out[i].i >> 16);
-            uq9_23_t power = _psd_power_proxy(re, im, (i != 0 && i != (NPERSEG / 2)));
+            q2_30_t re = (q2_30_t)cx_out[i].r;
+            q2_30_t im = (q2_30_t)cx_out[i].i;
+            uq9_55_t wide_power = _psd_power_proxy(re, im, (i != 0 && i != (NPERSEG / 2)));
+            uq9_23_t power = (uq9_23_t)(wide_power >> 32);
             if (power > (UINT32_MAX - acc_power[i])) {
                 acc_power[i] = UINT32_MAX;
             } else {
@@ -749,7 +736,7 @@ int audio_psd_stage_probe(const int16_t *sig, int16_t sig_len, int16_t fs, uq9_2
 // UQ8.56. Fixed KissFFT contributes a 1/N_FFT scale; _mel_db logs the raw
 // integer, so compensate with:
 //   offset = (20*log10(N_FFT) - 56*10*log10(2)) * 2^9 ≈ -52403.
-#define STFT_DB_OFFSET_Q9 ((q23_9_t)-52403)
+#define STFT_DB_OFFSET_Q9 ((q23_9_t) - 52403)
 #define MEL_DB_OFFSET STFT_DB_OFFSET_Q9
 #define LN2_Q7_9 ((q7_9_t)((FXP_LN2_Q24 + (1 << 14)) >> 15))
 
@@ -794,9 +781,7 @@ static uq2_14_t _mel_entropy(const uq8_56_t *row_power, int16_t n_frames) {
     uq8_56_t row_sum = 0;
     for (int16_t t = 0; t < n_frames; t++) {
         uq8_56_t power = row_power[t];
-        row_sum = (power > (UINT64_MAX - row_sum))
-                      ? UINT64_MAX
-                      : (uq8_56_t)(row_sum + power);
+        row_sum = (power > (UINT64_MAX - row_sum)) ? UINT64_MAX : (uq8_56_t)(row_sum + power);
     }
     if (row_sum == 0U) return 0;
 
@@ -829,17 +814,15 @@ static uq2_14_t _mel_entropy(const uq8_56_t *row_power, int16_t n_frames) {
         // integer (so p_raw = p * 2^16). Subtract 16*ln(2) to recover the
         // ln(p) of the true UQ0.16 probability. Numerical noise can push
         // ln_p slightly positive when p ≈ 1; clamp to 0 so -ln_p stays >= 0.
-        q7_9_t ln_p = (q7_9_t)((int32_t)_log_mel_power((uint64_t)p) -
-                                    (16 * (int32_t)LN2_Q7_9));
+        q7_9_t ln_p = (q7_9_t)((int32_t)_log_mel_power((uint64_t)p) - (16 * (int32_t)LN2_Q7_9));
         if (ln_p > 0) ln_p = 0;
 
         // p * -ln_p is UQ0.16 * Q7.9 = Q7.25; shift by 11 with rounding to
         // accumulate the row entropy in Q2.14.
         uq7_25_t prod = (uq7_25_t)((uint32_t)p * (uint32_t)(-ln_p));
         uint32_t term = (prod + (1U << 10)) >> 11;
-        entropy = (term > (uint32_t)(UINT16_MAX - entropy))
-                            ? UINT16_MAX
-                            : (uq2_14_t)(entropy + term);
+        entropy =
+            (term > (uint32_t)(UINT16_MAX - entropy)) ? UINT16_MAX : (uq2_14_t)(entropy + term);
     }
 
     return entropy;
