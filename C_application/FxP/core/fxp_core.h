@@ -110,7 +110,6 @@ typedef uint64_t uq32_32_t;
 /*  Math helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
-
 static inline uint32_t _fxp_isqrt32(uint32_t x) {
     if (x == 0) return 0;
     uint32_t bits = 32U - (uint32_t)__builtin_clz(x);

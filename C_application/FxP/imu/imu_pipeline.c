@@ -105,6 +105,7 @@ static inline q11_5_t _kurtosis_dev(q11_5_t sig, q11_5_t mean) { return (q11_5_t
 /* Kurtosis is computed as sum(dev^4) / (len * stddev^4) - 3.
  * The numerator and denominator use different Q formats, so the final
  * division applies a net Q22 scaling before subtracting Fisher's 3.
+
  */
 static q10_22_t _kurtosis(const q11_5_t *sig, int16_t len) {
     if (len <= 0) return 0;
@@ -115,36 +116,27 @@ static q10_22_t _kurtosis(const q11_5_t *sig, int16_t len) {
     }
     q11_5_t mean = _kurtosis_mean(sum_mean, len);
 
-    // Numerator and denominator paths share dev^2 but need it in different
-    // formats. The numerator (sum of dev^4) wants the full UQ22.10 product to
-    // preserve precision, while the denominator path squares again later and
-    // needs the wider UQ10.22 form so that variance and stddev fit cleanly.
     uq10_22_t sum_var = 0;
-    uq44_20_t sum_dev_4 = 0;
+    uq16_16_t sum_dev_4 = 0;
     for (int16_t i = 0; i < len; i++) {
         q11_5_t dev = _kurtosis_dev(sig[i], mean);
 
-        uq22_10_t dev_2_num = (uq22_10_t)(((int32_t)dev * (int32_t)dev));
-        uq44_20_t dev_4_num = (uq44_20_t)(((uint64_t)dev_2_num * (uint64_t)dev_2_num));
-        sum_dev_4 += dev_4_num;
-
-        uq10_22_t dev_2_denom = (uq10_22_t)(dev_2_num << 12U);
-        sum_var += dev_2_denom;
+        q5_11_t dev_q5_11 = (q5_11_t)((int32_t)dev << 6);                      
+        uq10_22_t dev_2 = (uq10_22_t)((int32_t)dev_q5_11 * (int32_t)dev_q5_11);
+        uq24_8_t dev_2_low = dev_2 >> 14U;                                     
+        sum_dev_4 += dev_2_low * dev_2_low;                                 
+        sum_var += (uq10_22_t)dev_2;                         
     }
     // all denominator related
     uq10_22_t variance = (uq10_22_t)(sum_var / (uint16_t)len);
     uq5_11_t stddev = (uq5_11_t)fxp_sqrt32(variance);
     uq10_22_t stddev_2 = (uq10_22_t)((uint32_t)stddev * (uint32_t)stddev);
-    uq20_44_t stddev_4 = (uq20_44_t)((uint64_t)stddev_2 * (uint64_t)stddev_2);
-    uq20_44_t denom = (uq20_44_t)((uint64_t)len * stddev_4);
-
-    // sum_dev_4 is UQ44.20 and denom is UQ20.44.
-    // To return Q10.22, the ratio needs a net left shift of 46 bits:
-    // 44 denominator frac bits - 20 numerator frac bits + 22 output frac bits.
-    // We split that as numerator << 16 and denominator >> 30 to stay in 64-bit.
-    uint64_t denom_shifted = (uint64_t)denom >> 30U;
+    uq10_6_t stddev_2_low = (uq10_6_t)(stddev_2 >> 16U);                           
+    uq20_12_t stddev_4 = (uq20_12_t)((uint32_t)stddev_2_low * (uint32_t)stddev_2_low);
+    uq20_12_t denom = (uq20_12_t)((uint32_t)len * stddev_4);
+    uint32_t denom_shifted = denom >> 10U;
     if (denom_shifted == 0) return 0;
-    uint64_t normalized = (sum_dev_4 << 16U) / denom_shifted;
+    uint32_t normalized = (sum_dev_4 << 8U) / denom_shifted;
 
     return (q10_22_t)((int32_t)normalized - FXP_KURT_FISHER);
 }
